@@ -27,6 +27,9 @@ var url_edit: LineEdit
 var copy_button: Button
 var open_url_button: Button
 var qr_rect: TextureRect
+var mode_option: OptionButton
+var named_token_edit: LineEdit
+var named_host_edit: LineEdit
 
 var _downloading := false
 
@@ -71,7 +74,7 @@ func _init() -> void:
 	dl_row.add_child(download_bar)
 
 	# test tunnel
-	left.add_child(_heading("Test a quick tunnel"))
+	left.add_child(_heading("Test a tunnel"))
 	var test_row := HBoxContainer.new()
 	left.add_child(test_row)
 	test_button = Button.new()
@@ -79,6 +82,14 @@ func _init() -> void:
 	test_button.tooltip_text = "Starts a throwaway Cloudflare Quick Tunnel to a tiny local test page. Anyone with the URL can open that page while it runs."
 	test_button.pressed.connect(_on_test_pressed)
 	test_row.add_child(test_button)
+	mode_option = OptionButton.new()
+	mode_option.add_item("Quick (random URL)")
+	mode_option.add_item("Named (stable URL)")
+	mode_option.tooltip_text = "Named tunnels need a Cloudflare account: create one in the dashboard, copy its 'run with token' token and the public hostname you routed to it."
+	mode_option.item_selected.connect(func(_i: int) -> void:
+		named_token_edit.visible = mode_option.selected == 1
+		named_host_edit.visible = mode_option.selected == 1)
+	test_row.add_child(mode_option)
 	status_label = Label.new()
 	status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -101,6 +112,17 @@ func _init() -> void:
 	open_url_button.disabled = true
 	open_url_button.pressed.connect(func() -> void: OS.shell_open(url_edit.text))
 	url_row.add_child(open_url_button)
+	named_token_edit = LineEdit.new()
+	named_token_edit.placeholder_text = "Tunnel token (Cloudflare dashboard -> 'run with token')"
+	named_token_edit.secret = true
+	named_token_edit.visible = false
+	named_token_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.add_child(named_token_edit)
+	named_host_edit = LineEdit.new()
+	named_host_edit.placeholder_text = "Public hostname routed to the tunnel, e.g. party.example.com"
+	named_host_edit.visible = false
+	named_host_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.add_child(named_host_edit)
 
 	# docs
 	left.add_child(_heading("Docs"))
@@ -186,7 +208,7 @@ func _on_download_finished(ok: bool, info: String) -> void:
 
 
 func _on_test_pressed() -> void:
-	if tunnel.state in ["starting", "ready", "downloading"]:
+	if tunnel.state in ["starting", "ready", "downloading", "lost"]:
 		tunnel.stop()
 		responder.close()
 		return
@@ -194,6 +216,12 @@ func _on_test_pressed() -> void:
 	if port == 0:
 		status_label.text = "Could not open a local test port."
 		return
+	if mode_option.selected == 1:
+		tunnel.mode = "named"
+		tunnel.named_token = named_token_edit.text.strip_edges()
+		tunnel.named_hostname = named_host_edit.text.strip_edges()
+	else:
+		tunnel.mode = "quick"
 	tunnel.start(port)
 
 
@@ -211,6 +239,9 @@ func _on_tunnel_state(state: String, detail: String) -> void:
 			status_label.text = "Ready. Open the URL (or scan the QR) from any network."
 			test_button.text = "Stop"
 			_show_url(detail)
+		"lost":
+			status_label.text = "Tunnel lost: %s (it may recover on its own, or press Stop then Test to restart)" % detail
+			test_button.text = "Stop"
 		"failed":
 			status_label.text = "Failed: %s" % detail
 			test_button.text = "Test tunnel"
