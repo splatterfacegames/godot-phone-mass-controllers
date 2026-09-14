@@ -271,7 +271,10 @@ func run(t) -> void:
 	var reaper2 := _make(t, fake)
 	reaper2.node.start(8102)
 	t.ok(await t.wait_until(func(): return reaper2.node.state == "ready", 15.0), "ready")
-	t.ok(OS.is_process_running(OS.get_process_id()), "own process untouched")
+	# OS.is_process_running only accepts child pids on Unix; our own pid needs kill -0 there.
+	var self_alive: bool = OS.is_process_running(OS.get_process_id()) if OS.get_name() == "Windows" \
+		else OS.execute("sh", ["-c", "kill -0 %d" % OS.get_process_id()], [], true) == 0
+	t.ok(self_alive, "own process untouched")
 	t.ok(" | ".join(reaper2.node.log_lines).contains("left alone"), "recycled-pid guard logged")
 	reaper.node.stop()
 	reaper2.node.stop()

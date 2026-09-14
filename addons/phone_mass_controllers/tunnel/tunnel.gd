@@ -861,7 +861,7 @@ func _reap_stale() -> void:
 		return
 	if pid == _pid or _live_pids.has(pid):
 		return  # a live tunnel in this process owns it
-	if not OS.is_process_running(pid):
+	if not _pid_alive(pid):
 		DirAccess.remove_absolute(p)
 		return
 	if _pid_looks_like_cloudflared(pid, str(data.get("exe", ""))):
@@ -870,6 +870,18 @@ func _reap_stale() -> void:
 	else:
 		log_lines.append("PMCTunnel: pid file names live pid %d that doesn't look like cloudflared; left alone" % pid)
 	DirAccess.remove_absolute(p)
+
+
+## Is [param pid] still running? OS.is_process_running only accepts our own children on Unix and
+## pushes an engine error for anything else, so non-Windows goes through `kill -0` instead
+## (EPERM counts as alive — better to keep a stranger's pid file than reap a live process).
+static func _pid_alive(pid: int) -> bool:
+	if OS.get_name() == "Windows":
+		return OS.is_process_running(pid)
+	if OS.execute("sh", ["-c", "kill -0 %d 2>/dev/null" % pid], [], true) == 0:
+		return true
+	# EPERM (alive, another user) vs ESRCH (gone): /proc exists on Linux; elsewhere err on "alive".
+	return OS.get_name() != "Linux" or DirAccess.dir_exists_absolute("/proc/%d" % pid)
 
 
 ## Is [param pid] plausibly the recorded cloudflared? Compares its command line / image name against
