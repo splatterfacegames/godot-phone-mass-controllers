@@ -178,7 +178,9 @@ func _messaging(t) -> void:
 	await wa.send_json({"t": "pmc.ping", "c": 12345.5})
 	var pong := await wa.wait_json("pmc.pong")
 	t.eq(pong.get("c"), 12345.5, "pong echoes c")
-	t.ok(abs(float(pong.get("s", 0)) - Time.get_ticks_msec()) < 1000, "pong s is server ms")
+	var epoch_ms := Time.get_unix_time_from_system() * 1000.0
+	t.ok(absf(float(pong.get("s", 0)) - epoch_ms) < 2000, "pong s is epoch ms")
+	t.ok(absf(float(a[1].get("server_ms", 0)) - epoch_ms) < 60000, "welcome server_ms is epoch ms")
 
 	await wb.send_json({"t": "pmc.profile", "name": "Bee", "profile": {"hat": 1}})
 	await _wait_seen(t, "updated", idb)

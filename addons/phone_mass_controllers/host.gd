@@ -1026,7 +1026,7 @@ func _on_ws_text(c: PMCConnection, text: String, now: int) -> void:
 		"msg":
 			message_received.emit(p, m.get("d"))
 		"pmc.ping":
-			_send_json(c, {"t": "pmc.pong", "c": m.get("c"), "s": now})
+			_send_json(c, {"t": "pmc.pong", "c": m.get("c"), "s": _epoch_ms()})
 		"pmc.profile":
 			if _apply_identity(p, m):
 				player_updated.emit(p)
@@ -1185,8 +1185,12 @@ static func _clean_name(s: String) -> String:
 func _welcome(c: PMCConnection, p: PMCPlayer, rejoined: bool) -> void:
 	_send_json(c, {
 		"t": "pmc.welcome", "id": p.id, "token": p.token, "name": p.name, "profile": p.profile,
-		"rejoined": rejoined, "admin": p.is_admin, "server_ms": Time.get_ticks_msec(), "join_url": join_url(),
+		"rejoined": rejoined, "admin": p.is_admin, "server_ms": _epoch_ms(), "join_url": join_url(),
 	})
+
+
+static func _epoch_ms() -> int:
+	return int(Time.get_unix_time_from_system() * 1000.0)
 
 
 func _reject(c: PMCConnection, code: String, reason: String) -> void:

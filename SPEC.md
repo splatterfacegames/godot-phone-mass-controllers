@@ -64,9 +64,9 @@ Host → client:
 
 | t | fields | notes |
 |---|--------|-------|
-| `pmc.welcome` | `id:int`, `token:string`, `name`, `profile`, `rejoined:bool`, `admin:bool`, `server_ms:int`, `join_url:string` | |
+| `pmc.welcome` | `id:int`, `token:string`, `name`, `profile`, `rejoined:bool`, `admin:bool`, `server_ms:int` (epoch ms UTC), `join_url:string` | |
 | `pmc.reject` | `code:string` (`bad_code`, `full`, `version`, `banned`, `bad_hello`), `reason:string` | then close 4000 |
-| `pmc.pong` | `c`, `s:int` (server ms) | clock-offset estimate |
+| `pmc.pong` | `c`, `s:int` (epoch ms UTC) | clock-offset estimate; `s` is wall-clock epoch ms, so `serverNow()` is comparable to `turn_ends_at_ms`-style deadlines stamped from `Time.get_unix_time_from_system() * 1000` |
 | `pmc.auth` | `ok:bool` | 5 failures → 30 s lockout per connection |
 | `pmc.kicked` | `reason:string` | then close 4001 |
 | `pmc.replaced` | | same token connected elsewhere, then close 4002 |
