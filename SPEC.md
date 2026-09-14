@@ -85,7 +85,7 @@ Host → client:
 | `pmc.auth` | `ok:bool`, `locked_ms?:int`, `disabled?:bool` | 5 failures → 30 s per connection; 20 per address → 60 s; `admin_pin_max_failures` (default 20) across all addresses disables the PIN until restart (`disabled:true`) |
 | `pmc.kicked` | `reason:string` | then close 4001 |
 | `pmc.replaced` | | same token connected elsewhere, then close 4002 |
-| `pmc.moved` | `url:string` | join URL changed (ephemeral tunnel). https→https pages may auto-follow; others should ask for a re-scan |
+| `pmc.moved` | `d.url:string` | join URL changed mid-session (tunnel replaced); sent before the old tunnel goes down. https→https pages may auto-follow; others should show "rescan/rejoin at the new URL" |
 | `msg` | `d:any` | game message |
 
 HTTP auth for custom routes: after join, pmc.js sets a `pmc_token` cookie (value = the rejoin token).
@@ -152,11 +152,26 @@ func send(to, data) -> void                           # to: PMCPlayer | int; dat
 func broadcast(data, filter: Callable = Callable()) -> void   # filter(player) -> bool
 func kick(to, reason := "", ban := false, remember := false) -> void   # remember: keep a tombstone so the token rejoins with id+meta; ban: refuse the token
 func add_route(prefix: String, handler: Callable) -> void     # handler(req: PMCHttpRequest) -> PMCHttpResponse or null (fall through)
-func serve_directory(prefix: String, dir: String, players_only := false) -> void  # players_only: require a joined player's token (?t= or pmc_token cookie) else 403
+func serve_directory(prefix: String, dir: String, players_only := false) -> void  # players_only: require a joined player's token (?t= or pmc_token cookie) else 403; dir absolute or res:// or user://
 func require_player(req: PMCHttpRequest) -> PMCPlayer          # player for ?t=<token> or the pmc_token cookie, else null → respond 403
-func start_tunnel() -> void                           # one-click outside-LAN (see §5); sets advertise URL on success
+
+@export_group("Tunnel")
+@export var tunnel_allow_download := true             # fetch cloudflared when missing
+@export var cloudflared_path := ""
+@export var tunnel_mode := "quick"                    # "quick" | "named"
+@export var named_tunnel_token := ""                  # dashboard "run with token" token
+@export var named_tunnel_hostname := ""               # public hostname routed to the tunnel
+@export var tunnel_verify_dns := true                 # wait for the new hostname to resolve before ready
+@export var tunnel_ready_timeout_sec := 60.0
+@export var tunnel_extra_args: PackedStringArray = [] # e.g. ["--protocol", "http2"]
+@export var tunnel_join_code := ""                    # used as-is, never auto-cleared
+@export var tunnel_auto_restart := true               # bounded relaunch after a lost tunnel
+@export var tunnel_restart_delay_sec := 2.0
+
+func start_tunnel(code := "") -> void                 # outside-LAN (see §5); code overrides join_code. No-op while a healthy tunnel is up.
+func restart_tunnel(code := "") -> void               # rolling replace: pmc.moved to players, then the old tunnel dies
 func stop_tunnel() -> void
-signal tunnel_state_changed(state: String, url: String)       # "downloading" | "starting" | "ready" | "failed" | "stopped"
+signal tunnel_state_changed(state: String, url: String)       # "downloading" | "starting" | "ready" | "lost" | "failed" | "stopped"
 
 class_name PMCPlayer extends RefCounted
 var id: int; var token: String; var name: String; var profile: Dictionary
@@ -214,24 +229,54 @@ pmc.rttMs;                            // rolling avg round-trip ms
   RTT (also exposed as `player.rtt_ms`) so remote players stay competitive.
 - Zero dependencies, no build step for consumers.
 
-## 5. Outside-LAN join: one-click Cloudflare Quick Tunnel
+## 5. Outside-LAN join: Cloudflare tunnels (quick + named)
 
-`PMCTunnel` (used by `PMCHost.start_tunnel()` and an editor dock button):
+`PMCTunnel` (used by `PMCHost.start_tunnel()` / `restart_tunnel()` and the editor dock):
 
 1. Resolve `cloudflared`: export var path → env `PMC_CLOUDFLARED` → `PATH` → `user://pmc/bin/cloudflared[.exe]`.
 2. If missing, download the official release asset for the OS/arch from
    `https://github.com/cloudflare/cloudflared/releases/latest/download/…` (windows-amd64.exe, linux-amd64,
-   linux-arm64, darwin `.tgz`, extracted via `tar`). Verify it runs `--version`. Download requires `allow_download=true`,
-   default true in the editor and false at runtime unless the game opts in.
-3. Run `cloudflared tunnel --no-autoupdate --url http://127.0.0.1:<port>` via `OS.execute_with_pipe`. Read stderr
-   for `https://<random>.trycloudflare.com` and wait for the "Registered tunnel connection" line.
-4. On ready: `advertise_url` = tunnel URL, `join_url_changed`, QR regenerates. **If `join_code` is empty, auto-generate
-   a 6-letter code** (24^6 ≈ 191M — the host is now on the public internet). The QR and `join_url()` carry it
-   as `?code=`; while tunneled, `/pmc/info.json` and `/pmc/qr.png` answer only to loopback or a valid `?code=`.
-5. Kill the process on `stop_tunnel()`, host `stop()`, and `NOTIFICATION_WM_CLOSE_REQUEST` / exit.
-   Surface failures (no network, download blocked, process exit) through `tunnel_state_changed("failed", reason)`.
+   linux-arm64, darwin `.tgz`, extracted via `tar`). The binary must then pass: SHA-256 vs the release's GitHub
+   API digest, `cloudflared --version` ≥ `minimum_version` (default 2022.6.2), and an OS code-signature check
+   where supported (Windows Authenticode — must be Valid and signed by Cloudflare, Inc. when a signature is
+   present; macOS `codesign --verify`, with `spctl` for notarization; unsigned binaries fall back to the digest
+   check — Linux users should prefer their distro's signed Cloudflare package). A managed binary older than
+   `binary_max_age_days` (default 30) is re-verified against the latest release and refreshed when it drifted.
+   Download requires `allow_download=true` (default: editor on, runtime off unless the game opts in).
+3. **Quick mode** runs `cloudflared tunnel --no-autoupdate --config <isolated> --url http://127.0.0.1:<port>`
+   via `OS.execute_with_pipe`. The always-isolated `--config` keeps a default `~/.cloudflared/config.yml`
+   (left over from named-tunnel setups) from breaking the quick tunnel. stderr is read for
+   `https://<random>.trycloudflare.com` and "Registered tunnel connection"; with `verify_dns` the hostname must
+   also resolve over DNS-over-HTTPS before `ready`.
+   **Named mode** runs `cloudflared tunnel --no-autoupdate run --token <named_token>`, or — with
+   `named_tunnel` + `named_credentials_file` — a generated `named-tunnel.yml` (ingress hostname →
+   `http://127.0.0.1:<port>`) and `run <named_tunnel>`. No trycloudflare URL is printed; the URL is
+   `https://<named_hostname>`.
+4. States: `downloading` → `starting` → `ready` → `lost` (every edge connection unregistered for
+   `lost_grace_sec`, or the process exits post-ready; an alive process can return to `ready` on
+   re-registration) → `stopped` / `failed`. Creation failures (HTTP 429 / error 1015) retry with exponential
+   backoff (`max_retries` default 2, `retry_backoff_sec` default 4 s). When QUIC (UDP 7844) looks blocked —
+   its signature errors in the log, or registration stalling past `protocol_fallback_sec` after the URL was
+   issued — cloudflared relaunches once with `--protocol http2` (skipped when `extra_args` already sets a
+   protocol). Common error lines map to actionable hints ("rate-limited", "UDP blocked", "DNS filter").
+5. On `ready`: `advertise_url` = tunnel URL, `join_url_changed`, QR regenerates. `join_code` empty →
+   **auto-generate a 6-letter code** (24^6 ≈ 191M — the host is now on the public internet); the QR and
+   `join_url()` carry it as `?code=`, and `/pmc/info.json` + `/pmc/qr.png` (which reveal the URL) answer only to
+   loopback or a valid `?code=`. `start_tunnel(code)` or `tunnel_join_code` supplies a code that is used as-is
+   and never auto-cleared. The QR/join URL is only ever shown post-`ready` — a phone that resolves a
+   brand-new hostname too early can sit on a cached NXDOMAIN for ~90 s (fix: airplane-mode toggle or wait).
+6. Lifecycle: `stop_tunnel()` and freeing the host kill the child process; the pid is recorded in
+   `user://pmc/cloudflared.pid` and a leftover from a crashed engine is reaped on the next `start()` — only
+   when the pid's command line still looks like cloudflared, so a recycled pid is never killed. A `ready`
+   tunnel survives `stop()`→`start()` on the same port (retargeted when the port changed) and a host
+   teardown detaches it to the scene root, where the next `start_tunnel()` re-adopts it within ~2 minutes.
+7. `restart_tunnel()` performs a rolling restart: the replacement tunnel reaches `ready` first, all joined
+   players get `{"t":"pmc.moved","d":{"url":<new join url>}}`, then the old tunnel stops. A `lost` tunnel is
+   auto-restarted by the host (`tunnel_auto_restart`, `tunnel_restart_delay_sec`, bounded per `start_tunnel`).
 
-Quick Tunnels need no Cloudflare account, but URLs are ephemeral and there is no uptime guarantee. The caveats are tracked as GitHub issues.
+Quick Tunnels need no Cloudflare account, but URLs are ephemeral, best-effort, rate-limited (HTTP 429,
+~200 concurrent in-flight requests, no SSE) and come with no uptime guarantee — use a named tunnel (or
+another provider, see docs/tunnels.md) for anything you want to print or keep.
 
 ## 6. Editor plugin
 
