@@ -23,7 +23,7 @@ players outside your LAN.
   Quick Tunnel (no account), waits for DNS, swaps the QR to the `https://…trycloudflare.com` URL, and turns on a join code.
 - **`pmc.js` controller SDK.** Zero dependencies, no build step. Handles reconnect with backoff, clock sync
   (per-player RTT + host-clock input timestamps for fair timing), haptics with an iOS-safe fallback,
-  and wake lock.
+  and keep-the-screen-on (wake lock or a NoSleep-style clip where only `http://` is available).
 - **Lobby helpers.** `PMCQueue`, `PMCVote` (majority + vetoes + timeout) and `PMCRotation` (winner-stays / loser-stays / strict),
   extracted from a real party game.
 

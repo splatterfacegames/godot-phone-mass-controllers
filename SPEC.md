@@ -156,7 +156,7 @@ func next_pair(policy, last_blue: int, last_red: int, winner: int, streaks: Dict
 ## 4. JS SDK — served at `/pmc/pmc.js` (ES module) + `pmc.d.ts`
 
 ```js
-import { connect, feedback, vibrate, wakeLock } from '/pmc/pmc.js';
+import { connect, feedback, keepScreenOn, vibrate, wakeLock } from '/pmc/pmc.js';
 const pmc = connect({ name, profile, code /* default: ?code= from location */, tokenKey });
 pmc.on('welcome', ({id, rejoined}) => {}); pmc.on('message', d => {}); pmc.on('binary', ab => {});
 pmc.on('status', s => {});            // 'connecting' | 'open' | 'reconnecting' | 'closed'
@@ -176,7 +176,8 @@ pmc.rttMs;                            // rolling avg round-trip ms
   itself — show "re-scan the QR" on the `moved` event.
 - `vibrate(pattern)` feature-detects (absent on iOS). `feedback('buzz'|'success'|'error')` vibrates where
   possible, else a 60 ms screen flash + WebAudio click (audio only after a user gesture).
-- `wakeLock()` requests a screen wake lock when available (secure contexts only) and falls back silently.
+- `wakeLock()` requests a screen wake lock (secure contexts only). `keepScreenOn()` uses it where allowed and
+  otherwise plays a muted looping clip on the next user gesture (NoSleep-style).
 - `timestamp()` stamps inputs on the estimated host clock; hosts should credit them bounded by the player's
   RTT (also exposed as `player.rtt_ms`) so remote players stay competitive.
 - Zero dependencies, no build step for consumers.

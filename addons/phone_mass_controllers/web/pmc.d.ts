@@ -99,3 +99,9 @@ export declare function feedback(kind?: PMCFeedbackKind): 'vibrate' | 'flash' | 
 
 /** Request a screen wake lock (secure contexts only). Resolves false silently when unavailable. */
 export declare function wakeLock(): Promise<boolean>;
+
+/**
+ * Keep the screen on during play: wake lock where allowed, else a muted looping clip that
+ * starts on the next user gesture (NoSleep-style). Resolves false only when neither can run.
+ */
+export declare function keepScreenOn(): Promise<boolean>;

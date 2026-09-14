@@ -67,6 +67,14 @@ describe('pmc.js SDK (real Godot host)', { timeout: 120000 }, () => {
     await p.ctx.close();
   });
 
+  it('keepScreenOn() resolves true (wake lock on localhost, else the video fallback)', async () => {
+    const p = await newPhone(browser, 'Wren');
+    await join(p, host, { name: 'Wren' });
+    const ok = await p.page.evaluate(() => import('/pmc/pmc.js').then((m) => m.keepScreenOn()));
+    assert.equal(ok, true);
+    await p.ctx.close();
+  });
+
   it('the demo buzz carries an `at` timestamp', async () => {
     const p = await newPhone(browser, 'Ada2');
     await join(p, host, { name: 'Ada2' });

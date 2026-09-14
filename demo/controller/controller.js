@@ -8,7 +8,7 @@
 //   phone -> host  {type:"buzz", at}     (at = pmc.timestamp(): host-clock tap time, RTT-bounded)
 //                  {type:"admin", action:"start"|"next"|"reset"|"kick", id?}
 //   binary         any bytes are echoed back to the sender
-import { connect, feedback, wakeLock } from '/pmc/pmc.js';
+import { connect, feedback, keepScreenOn } from '/pmc/pmc.js';
 
 const COLORS = ['#ff5a5f', '#ff8c42', '#ffc53d', '#2ec27e', '#26c6da', '#3d8bfd', '#a371f7', '#ff6fb5'];
 const EMOJIS = ['🦊', '🐸', '🐙', '🦉', '🐼', '🦄', '🐝', '🐢', '🌵', '🍉', '🚀', '👾', '🎸', '🍩', '⚡', '🌈'];
@@ -58,7 +58,7 @@ $('join-form').onsubmit = (ev) => {
   else start();
   paintMe();
   show('play');
-  wakeLock();
+  keepScreenOn(); // wake lock where allowed; NoSleep-style video fallback elsewhere
 };
 
 $('edit-btn').onclick = () => {

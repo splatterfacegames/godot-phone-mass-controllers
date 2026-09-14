@@ -26,6 +26,16 @@ tactile-ish feedback instead: it vibrates where supported and otherwise flashes 
 unlocks its AudioContext on the first `pointerdown` — call `feedback()` in response to taps and the
 click will be ready.
 
+## Screen wake lock needs a secure context
+
+The Screen Wake Lock API only works on `https://` or localhost, so on a plain `http://192.168.x.x`
+LAN page `wakeLock()` fails and phones dim and lock mid-game. `keepScreenOn()` handles both cases:
+it tries the real API first, and on an insecure context it arms a NoSleep-style fallback — a tiny
+muted looping video that keeps the screen awake while playing. Autoplay rules mean the clip starts
+on the first user gesture (the join button tap counts). The same secure-context restriction blocks
+clipboard and some sensor APIs on LAN pages; running the party over the https tunnel is the real fix
+when keeping screens on matters.
+
 ## Ephemeral tunnel URLs
 
 Quick Tunnel URLs change every run (and can change mid-session if the tunnel restarts). When the
