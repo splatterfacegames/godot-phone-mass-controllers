@@ -44,6 +44,8 @@ var player_id := 0
 var hello_deadline_msec := 0
 ## Heartbeat pings sent without any inbound frame since.
 var pings_unanswered := 0
+## When the last heartbeat ping was queued (ticks msec; 0 = none in flight). Used for player RTT.
+var ping_sent_msec := 0
 ## Next heartbeat tick.
 var next_ping_msec := 0
 ## Whether we've sent a close frame.

@@ -804,7 +804,12 @@ func _process_ws(c: PMCConnection, now: int) -> void:
 				if not c.close_sent:
 					c.queue(PMCWsFrame.pong(ev.data))
 			"pong":
-				pass
+				if c.ping_sent_msec > 0:
+					var pp: PMCPlayer = _players.get(c.player_id)
+					if pp != null:
+						var sample := float(now - c.ping_sent_msec)
+						pp.rtt_ms = sample if pp.rtt_ms <= 0.0 else pp.rtt_ms * 0.75 + sample * 0.25
+					c.ping_sent_msec = 0
 			"close":
 				_on_peer_socket_closing(c)
 				if not c.close_sent:
@@ -889,6 +894,7 @@ func _timers(now: int) -> void:
 					continue
 				c.queue(PMCWsFrame.ping())
 				c.pings_unanswered += 1
+				c.ping_sent_msec = now
 				c.next_ping_msec = now + _heartbeat_msec()
 
 	if now - _last_sweep_msec >= 100:

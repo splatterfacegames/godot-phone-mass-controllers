@@ -450,6 +450,7 @@ func _heartbeat(t) -> void:
 		alive_ws._drain()
 		return false, 0.8)
 	t.ok(not alive_ws.sock.closed and host.get_player(int(alive[1].id)).connected, "pong-answering socket stays open")
+	t.ok(host.get_player(int(alive[1].id)).rtt_ms > 0.0, "rtt_ms measured from heartbeat pong")
 	alive_ws.close()
 	host.heartbeat_seconds = 0.0
 	await t.wait(0.1)

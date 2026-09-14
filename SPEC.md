@@ -133,6 +133,7 @@ var id: int; var token: String; var name: String; var profile: Dictionary
 var connected: bool; var is_admin: bool; var meta: Dictionary
 var joined_msec: int; var last_seen_msec: int; var grace_deadline_msec: int
 var remote_address: String
+var rtt_ms: float      # rolling average of the WS heartbeat ping→pong round trip (0 until first sample)
 ```
 
 Optional helpers extracted from a real party game's lobby (pure logic, no networking, fully unit-tested):
