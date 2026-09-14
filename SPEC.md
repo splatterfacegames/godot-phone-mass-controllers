@@ -119,8 +119,11 @@ class_name PMCHost extends Node
 @export var advertise_url := ""                       # override join URL (else best LAN IPv4, or tunnel URL)
 @export var max_message_bytes := 1 << 20
 @export var autostart := false
+@export var no_joins_hint_seconds := 0.0                  # >0: emit no_joins_hint if the URL sits unjoined that long
+@export var io_thread_enabled := false                  # worker thread does accept/read/write/frame decode; set before start()
 # limits (selected): max_connections, max_connections_per_address, join_code_max_failures,
-# join_code_block_seconds, admin_pin_max_failures (global PIN budget, default 20), header/body sizes, timeouts
+# join_code_block_seconds, admin_pin_max_failures (global PIN budget, default 20), header/body sizes, timeouts,
+# check_origin + allowed_origins (opt-in WS Origin allow-list)
 
 signal started(port: int)
 signal stopped

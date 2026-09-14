@@ -89,6 +89,11 @@ signal no_joins_hint
 ## When > 0, [signal no_joins_hint] fires once if no player has joined this many seconds after the join
 ## URL went up (start, or a later URL change such as the tunnel coming up). 0 disables it.
 @export var no_joins_hint_seconds := 0.0
+## Move socket I/O — accept, read, write and HTTP/WS frame decode — to a worker thread. The main thread
+## then only applies complete requests and decoded events (game logic and signals stay single-threaded),
+## and [member io_budget_msec] bounds how much queued event work each [method poll] drains.
+## Off by default; set before [method start] — toggling while running has no effect.
+@export var io_thread_enabled := false
 
 @export_group("Limits")
 ## Poll sockets automatically from [method Node._process]. Turn it off to call [method poll] yourself.
@@ -185,6 +190,8 @@ var _join_count := 0           # hellos that produced a welcome (join, rejoin, r
 var _hint_deadline_msec := 0  # armed deadline for no_joins_hint (0 = disarmed)
 var _hint_joins_at_arm := 0
 var _hint_fired := false
+var _io: PMCIoWorker = null
+var _io_thread: Thread = null
 var _stats := {
 	"http_requests": 0, "ws_messages_in": 0, "ws_messages_out": 0, "bytes_in": 0, "bytes_out": 0,
 	"last_poll_usec": 0, "max_poll_usec": 0, "accepted": 0, "refused": 0,
@@ -244,6 +251,8 @@ func start() -> Error:
 	_port = _server.get_local_port()
 	_running = true
 	_last_sweep_msec = Time.get_ticks_msec()
+	if io_thread_enabled:
+		_start_io_thread()
 	_arm_hint()
 	set_process(auto_poll)
 	started.emit(_port)
@@ -273,6 +282,8 @@ func _shutdown(graceful: bool) -> void:
 	if not _running:
 		return
 	_running = false
+	if _io_thread != null:
+		_stop_io_thread()
 	for c in _conns:
 		if graceful and c.mode == PMCConnection.Mode.WS and not c.close_sent:
 			c.queue(PMCWsFrame.close(1001, "server stopping"))
@@ -678,47 +689,50 @@ func poll() -> void:
 	var t0 := Time.get_ticks_usec()
 	var now := Time.get_ticks_msec()
 
-	var accepted := 0
-	while _server != null and _server.is_connection_available() and accepted < 64:
-		var peer := _server.take_connection()
-		if peer == null:
-			break
-		accepted += 1
-		if _conns.size() >= max_connections:
-			peer.disconnect_from_host()
-			_stats["refused"] += 1
-			continue
-		var conn := PMCConnection.new(peer, now)
-		conn.slot = _stats["accepted"]
-		# Behind the tunnel every peer is loopback; those are counted per CF-Connecting-IP on their first request.
-		if not _behind_tunnel(conn):
-			if not _count_address(conn, conn.remote_address):
-				conn.close_now("too many connections from address")
+	if _io != null:
+		_drain_io_events(t0, now)
+	else:
+		var accepted := 0
+		while _server != null and _server.is_connection_available() and accepted < 64:
+			var peer := _server.take_connection()
+			if peer == null:
+				break
+			accepted += 1
+			if _conns.size() >= max_connections:
+				peer.disconnect_from_host()
 				_stats["refused"] += 1
 				continue
-		_conns.append(conn)
-		_stats["accepted"] += 1
+			var conn := PMCConnection.new(peer, now)
+			conn.slot = _stats["accepted"]
+			# Behind the tunnel every peer is loopback; those are counted per CF-Connecting-IP on their first request.
+			if not _behind_tunnel(conn):
+				if not _count_address(conn, conn.remote_address):
+					conn.close_now("too many connections from address")
+					_stats["refused"] += 1
+					continue
+			_conns.append(conn)
+			_stats["accepted"] += 1
 
-	_frame += 1
-	var n := _conns.size()
-	if n > 0:
-		# _conns is only ever replaced (never mutated in place) while iterating, so no copy is needed.
-		var conns := _conns
-		var deadline := t0 + int(io_budget_msec * 1000.0)
-		var start := _rr % n
-		var i := 0
-		while i < n and _running:
-			_service(conns[(start + i) % n], now)
-			i += 1
-			if (i & 7) == 0 and Time.get_ticks_usec() > deadline:
-				break
-		_rr = (start + i) % n
+		_frame += 1
+		var n := _conns.size()
+		if n > 0:
+			# _conns is only ever replaced (never mutated in place) while iterating, so no copy is needed.
+			var conns := _conns
+			var deadline := t0 + int(io_budget_msec * 1000.0)
+			var start := _rr % n
+			var i := 0
+			while i < n and _running:
+				_service(conns[(start + i) % n], now)
+				i += 1
+				if (i & 7) == 0 and Time.get_ticks_usec() > deadline:
+					break
+			_rr = (start + i) % n
 
 	if _running and now - _last_timer_msec >= _TIMER_MSEC:
 		_last_timer_msec = now
 		_timers(now)
 		_closed_pending = true
-	if _running and _closed_pending:
+	if _running and (_closed_pending or _io != null):
 		_closed_pending = false
 		_reap()
 
@@ -726,6 +740,84 @@ func poll() -> void:
 	_stats["last_poll_usec"] = dt
 	if dt > _stats["max_poll_usec"]:
 		_stats["max_poll_usec"] = dt
+
+
+func _start_io_thread() -> void:
+	_io = PMCIoWorker.new()
+	_io.server = _server
+	_io.max_header_bytes = max_header_bytes
+	_io.max_body_bytes = max_body_bytes
+	_io.max_message_bytes = max_message_bytes
+	_io_thread = Thread.new()
+	_io_thread.start(_io.run)
+
+
+func _stop_io_thread() -> void:
+	_io.mutex.lock()
+	_io.stop = true
+	_io.mutex.unlock()
+	_io_thread.wait_to_finish()
+	_io_thread = null
+	_io = null
+
+
+# Applies complete events produced by the I/O worker. Undrained events (io_budget_msec) go back to the
+# front of the worker's queue, preserving per-connection order.
+func _drain_io_events(t0: int, now: int) -> void:
+	_io.mutex.lock()
+	var evs: Array = _io.events
+	_io.events = []
+	_bytes_in += _io.bytes_in
+	_io.bytes_in = 0
+	_bytes_out += _io.bytes_out
+	_io.bytes_out = 0
+	_io.mutex.unlock()
+	_closed_pending = true
+	var deadline := t0 + int(io_budget_msec * 1000.0)
+	var i := 0
+	while i < evs.size() and _running:
+		var e: Dictionary = evs[i]
+		match e.kind:
+			"accept":
+				_io_accept(e.peer, now)
+			"http":
+				_handle_http_request(e.conn, e.request, now)
+			"http_error":
+				_respond(e.conn, null, PMCHttpResponse.error(e.status, e.reason), false)
+			"ws":
+				_on_ws_event(e.conn, e.ev, now)
+		i += 1
+		if (i & 15) == 0 and Time.get_ticks_usec() > deadline:
+			_io.mutex.lock()
+			_io.events = evs.slice(i) + _io.events
+			_io.mutex.unlock()
+			return
+
+
+func _io_accept(peer: StreamPeerTCP, now: int) -> void:
+	if _conns.size() >= max_connections:
+		peer.disconnect_from_host()
+		_stats["refused"] += 1
+		return
+	var conn := PMCConnection.new(peer, now)
+	conn.slot = _stats["accepted"]
+	# Behind the tunnel every peer is loopback; those are counted per CF-Connecting-IP on their first request.
+	if not _behind_tunnel(conn):
+		if not _count_address(conn, conn.remote_address):
+			conn.close_now("too many connections from address")
+			_stats["refused"] += 1
+			return
+	_conns.append(conn)
+	_stats["accepted"] += 1
+	_io.add_conn(conn)
+
+
+# Drops the socket: immediately in main-thread mode, on the worker's next pass when io_thread_enabled.
+func _conn_close(c: PMCConnection, reason: String) -> void:
+	if _io != null:
+		c.request_close(reason)
+	else:
+		c.close_now(reason)
 
 
 func _service(c: PMCConnection, now: int) -> void:
@@ -775,25 +867,31 @@ func _process_http(c: PMCConnection, now: int) -> void:
 		if r.has("error"):
 			_respond(c, null, PMCHttpResponse.error(r.error, r.reason), false)
 			break
-		_stats["http_requests"] += 1
-		var req: PMCHttpRequest = r.request
-		c.head_started_msec = now
-		if c.counted_address == "" and _behind_tunnel(c):
-			var addr := _forwarded_address(c, req)
-			if not _count_address(c, addr):
-				_respond(c, req, PMCHttpResponse.error(429, "too many connections from your address"), false)
-				break
-		req.remote_address = c.client_address
-		if req.path == "/pmc/ws":
-			_upgrade(c, req, now)
-			break
-		var resp := _route(req)
-		if resp == null:
-			if req.method == "GET" or req.method == "HEAD":
-				resp = PMCHttpResponse.error(404)
-			else:
-				resp = PMCHttpResponse.error(405).set_header("Allow", "GET, HEAD")
-		_respond(c, req, resp, req.wants_keep_alive())
+		_handle_http_request(c, r.request, now)
+
+
+# Applies one complete HTTP request. Shared by the main-thread parse loop and the io_thread event drain.
+func _handle_http_request(c: PMCConnection, req: PMCHttpRequest, now: int) -> void:
+	if not c.is_open() or c.mode != PMCConnection.Mode.HTTP or c.close_after_flush or c.upgrade_pending:
+		return
+	_stats["http_requests"] += 1
+	c.head_started_msec = now
+	if c.counted_address == "" and _behind_tunnel(c):
+		var addr := _forwarded_address(c, req)
+		if not _count_address(c, addr):
+			_respond(c, req, PMCHttpResponse.error(429, "too many connections from your address"), false)
+			return
+	req.remote_address = c.client_address
+	if req.path == "/pmc/ws":
+		_upgrade(c, req, now)
+		return
+	var resp := _route(req)
+	if resp == null:
+		if req.method == "GET" or req.method == "HEAD":
+			resp = PMCHttpResponse.error(404)
+		else:
+			resp = PMCHttpResponse.error(405).set_header("Allow", "GET, HEAD")
+	_respond(c, req, resp, req.wants_keep_alive())
 
 
 func _respond(c: PMCConnection, req: PMCHttpRequest, resp: PMCHttpResponse, keep_alive: bool) -> void:
@@ -813,13 +911,13 @@ func _respond(c: PMCConnection, req: PMCHttpRequest, resp: PMCHttpResponse, keep
 				f.seek(offset)
 				c.start_file(f, length)
 			if not keep_alive:
-				c.close_after_flush = true
+				c.close_when_flushed()
 			return
 	c.queue(resp.build_head(resp.body.size(), keep_alive))
 	if not head_only:
 		c.queue(resp.body)
 	if not keep_alive:
-		c.close_after_flush = true
+		c.close_when_flushed()
 
 
 func _upgrade(c: PMCConnection, req: PMCHttpRequest, now: int) -> void:
@@ -847,7 +945,10 @@ func _upgrade(c: PMCConnection, req: PMCHttpRequest, now: int) -> void:
 	resp.headers["Connection"] = "Upgrade"
 	resp.headers["Sec-WebSocket-Accept"] = PMCWsFrame.accept_key(key)
 	c.queue(resp.build_head(0, true))
-	c.upgrade_to_ws(max_message_bytes, now, int(hello_timeout_seconds * 1000.0), _heartbeat_msec())
+	if _io != null:
+		c.request_upgrade(max_message_bytes, now, int(hello_timeout_seconds * 1000.0), _heartbeat_msec())
+	else:
+		c.upgrade_to_ws(max_message_bytes, now, int(hello_timeout_seconds * 1000.0), _heartbeat_msec())
 
 
 func _heartbeat_msec() -> int:
@@ -865,42 +966,49 @@ func _process_ws(c: PMCConnection, now: int) -> void:
 		if ev.is_empty():
 			break
 		count += 1
-		c.pings_unanswered = 0
-		match ev.op:
-			"text":
-				if not c.close_sent and not c.rejected:
-					_msgs_in += 1
-					_on_ws_text(c, ev.data, now)
-			"binary":
-				if not c.close_sent and not c.rejected:
-					_msgs_in += 1
-					_on_ws_binary(c, ev.data, now)
-			"ping":
-				if not c.close_sent:
-					c.queue(PMCWsFrame.pong(ev.data))
-			"pong":
-				if c.ping_sent_msec > 0:
-					var pp: PMCPlayer = _players.get(c.player_id)
-					if pp != null:
-						var sample := float(now - c.ping_sent_msec)
-						pp.rtt_ms = sample if pp.rtt_ms <= 0.0 else pp.rtt_ms * 0.75 + sample * 0.25
-					c.ping_sent_msec = 0
-			"close":
-				_on_peer_socket_closing(c)
-				if not c.close_sent:
-					c.queue(PMCWsFrame.close(ev.code if ev.code != 1005 else 0))
-					c.close_sent = true
-				c.close_after_flush = true
-				if not c.has_pending_output():
-					c.close_now("closed by peer")
-			"error":
-				# Protocol failure: send the close frame and keep draining input until the peer closes or the
-				# handshake timeout passes. Closing with unread input would send a TCP RST, which can destroy
-				# the close frame before the peer reads it.
-				_on_peer_socket_closing(c)
-				_ws_close(c, ev.code, ev.reason)
+		_on_ws_event(c, ev, now)
 		if not _running:
 			return
+
+
+# Applies one decoded WS event. Shared by the main-thread decode loop and the io_thread event drain.
+func _on_ws_event(c: PMCConnection, ev: Dictionary, now: int) -> void:
+	if not c.is_open():
+		return  # a stale event: the socket closed after the worker queued it
+	c.pings_unanswered = 0
+	match ev.op:
+		"text":
+			if not c.close_sent and not c.rejected:
+				_msgs_in += 1
+				_on_ws_text(c, ev.data, now)
+		"binary":
+			if not c.close_sent and not c.rejected:
+				_msgs_in += 1
+				_on_ws_binary(c, ev.data, now)
+		"ping":
+			if not c.close_sent:
+				c.queue(PMCWsFrame.pong(ev.data))
+		"pong":
+			if c.ping_sent_msec > 0:
+				var pp: PMCPlayer = _players.get(c.player_id)
+				if pp != null:
+					var sample := float(now - c.ping_sent_msec)
+					pp.rtt_ms = sample if pp.rtt_ms <= 0.0 else pp.rtt_ms * 0.75 + sample * 0.25
+				c.ping_sent_msec = 0
+		"close":
+			_on_peer_socket_closing(c)
+			if not c.close_sent:
+				c.queue(PMCWsFrame.close(ev.code if ev.code != 1005 else 0))
+				c.close_sent = true
+			c.close_when_flushed("closed by peer")
+			if not c.has_pending_output():
+				_conn_close(c, "closed by peer")
+		"error":
+			# Protocol failure: send the close frame and keep draining input until the peer closes or the
+			# handshake timeout passes. Closing with unread input would send a TCP RST, which can destroy
+			# the close frame before the peer reads it.
+			_on_peer_socket_closing(c)
+			_ws_close(c, ev.code, ev.reason)
 
 
 # Detaches the player when the socket is going away, so grace starts immediately.
@@ -919,7 +1027,8 @@ func _ws_close(c: PMCConnection, code: int, reason := "") -> void:
 		c.queue(PMCWsFrame.close(code, reason))
 		c.close_sent = true
 		c.close_deadline_msec = Time.get_ticks_msec() + _CLOSE_HANDSHAKE_MSEC
-		c.flush(65536)
+		if _io == null:
+			c.flush(65536)
 
 
 func _send_json(c: PMCConnection, obj: Dictionary) -> void:
@@ -939,24 +1048,30 @@ func _timers(now: int) -> void:
 		if not c.is_open():
 			continue
 		if c.has_pending_output() and now - c.last_tx_msec > _STALL_MSEC:
-			c.close_now("write stalled")
+			_conn_close(c, "write stalled")
 			_on_peer_socket_closing(c)
 			continue
 		if c.mode == PMCConnection.Mode.HTTP:
 			if c.has_pending_output():
 				c.head_started_msec = now
 			elif now - c.head_started_msec > header_ms:
-				if c.buffered_in() > 0 or c.awaiting_body():
+				var partial := c.io_partial_in if _io != null else (c.buffered_in() > 0 or c.awaiting_body())
+				if partial:
 					_respond(c, null, PMCHttpResponse.error(408), false)
-					c.flush(65536)
-				c.close_now("header timeout")
+					if _io != null:
+						c.close_when_flushed("header timeout")
+					else:
+						c.flush(65536)
+						c.close_now("header timeout")
+				else:
+					_conn_close(c, "header timeout")
 		elif c.mode == PMCConnection.Mode.WS:
 			if c.close_sent:
 				if now >= c.close_deadline_msec and c.close_deadline_msec > 0:
-					c.close_now("close handshake timeout")
+					_conn_close(c, "close handshake timeout")
 				continue
 			if c.out_pending() > max_backlog_bytes:
-				c.close_now("backlog")
+				_conn_close(c, "backlog")
 				_on_peer_socket_closing(c)
 				continue
 			if c.player_id == 0 and not c.rejected and now >= c.hello_deadline_msec:
@@ -964,7 +1079,7 @@ func _timers(now: int) -> void:
 				continue
 			if now >= c.next_ping_msec:
 				if c.pings_unanswered >= 2:
-					c.close_now("heartbeat timeout")
+					_conn_close(c, "heartbeat timeout")
 					_on_peer_socket_closing(c)
 					continue
 				c.queue(PMCWsFrame.ping())

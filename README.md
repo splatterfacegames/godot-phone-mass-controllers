@@ -133,6 +133,9 @@ Measured over loopback on a Xeon W-2135 (Windows 11), host at 60 fps, main-threa
 | 200 × 60 msg/s | 9545 | 0 | 69 / 197 ms | 9.9 / 17.7 ms | 15.3 ms |
 
 A normal party game is far below the first busy row. Prefer binary frames for big payloads, since JSON parsing costs about 60 ms/MiB.
+`host.io_thread_enabled = true` (before `start()`) moves accept/read/write/frame-decode to a worker thread —
+the main thread then only applies complete requests and decoded events. See [docs/performance.md](docs/performance.md)
+for tuning, the burst-join backlog limit, and the io-thread contract.
 
 ## Tests
 
