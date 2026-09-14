@@ -190,8 +190,20 @@ Quick Tunnels need no Cloudflare account, but URLs are ephemeral and there is no
 
 ## 6. Editor plugin
 
-`plugin.cfg` + `plugin.gd`: adds a `PMCHost` custom node type and a bottom dock "Phone Controllers" that shows
-the host status of the running game where possible. In-editor it offers "Download cloudflared" and a docs link.
+`plugin.cfg` + `plugin.gd`. `PMCHost` registers via `class_name` alone (icon via `@icon` on host.gd) so it appears
+once in *Create Node*. The plugin adds a bottom dock "Phone Controllers" that shows the running game's host status
+and offers "Download cloudflared", a throwaway test tunnel, and docs links.
+
+- **Running-game status.** When the game runs from the editor (`OS.has_feature("editor")` + active debugger),
+  `PMCHost._ready` attaches `editor/ingame_reporter.gd`, which pushes `pmc:status` payloads over `EngineDebugger`
+  on host changes (plus a 2 s heartbeat) and answers `pmc:status` polls. Editor side, `editor/debugger_plugin.gd`
+  (an `EditorDebuggerPlugin` registered with `add_debugger_plugin`, capturing `pmc:*`) forwards payloads to the
+  dock, which renders port, join URL + QR, connected players and tunnel state.
+- **Exports.** `editor/export_plugin.gd` (`EditorExportPlugin`) re-packs served `res://` directories as raw files
+  so imported/unrecognized assets survive the pck: `web/` (the SDK), `res://controller` when present,
+  `controller_dir` on `PMCHost` nodes in `.tscn` scenes, and `res://` literals in `serve_directory`/`controller_dir`
+  assignments across `.gd` sources. The collection logic lives in `editor/export_scan.gd` (unit-tested); see
+  [docs/exporting.md](docs/exporting.md).
 
 ## 7. Repo layout
 
