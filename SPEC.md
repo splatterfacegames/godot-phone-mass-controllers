@@ -76,6 +76,8 @@ Identity: the token is a random 128-bit hex string issued by the host. The same 
 `grace_seconds` resumes the same `PMCPlayer` (same id, meta preserved) and emits `player_rejoined`. After grace
 expires the player is removed with `player_left(player, "timeout")`. A token seen after removal starts
 a new player, unless `remember_seconds` (default 3600) keeps a tombstone so the id and meta come back.
+Tombstones are written only on `"timeout"` removal (and on `kick(..., remember := true)`) — a plain
+`kick()` or `pmc.leave` drops the token, so the player comes back as someone new (new id, empty meta).
 
 ## 3. GDScript API
 
@@ -119,7 +121,7 @@ func players(include_disconnected := true) -> Array[PMCPlayer]
 func get_player(id: int) -> PMCPlayer
 func send(to, data) -> void                           # to: PMCPlayer | int; data: Dictionary/Array/String/number (JSON msg) or PackedByteArray (binary)
 func broadcast(data, filter: Callable = Callable()) -> void   # filter(player) -> bool
-func kick(to, reason := "") -> void
+func kick(to, reason := "", ban := false, remember := false) -> void   # remember: keep a tombstone so the token rejoins with id+meta; ban: refuse the token
 func add_route(prefix: String, handler: Callable) -> void     # handler(req: PMCHttpRequest) -> PMCHttpResponse or null (fall through)
 func serve_directory(prefix: String, dir: String) -> void     # e.g. serve_directory("/assets/", "C:/game/assets") — absolute or res:// or user://
 func start_tunnel() -> void                           # one-click outside-LAN (see §5); sets advertise URL on success

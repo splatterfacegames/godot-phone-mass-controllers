@@ -382,6 +382,19 @@ func _kick_replace_leave(t) -> void:
 	host.kick(int(g[1].id))
 	t.eq((await _wait_seen(t, "left", int(g[1].id)))[2], "kicked", "kick a player in grace")
 
+	t.section("kick(remember)")
+	var r2 := await _join(t, {"name": "Keep"})
+	var rid2 := int(r2[1].id)
+	var tok2: String = r2[1].token
+	host.get_player(rid2).meta["n"] = 5
+	host.kick(rid2, "afk", false, true)
+	t.eq((await _wait_seen(t, "left", rid2))[2], "kicked", "remembered kick still reports kicked")
+	var back2 := await _join(t, {"token": tok2})
+	t.eq(int(back2[1].get("id", -1)), rid2, "remembered kick restores id")
+	t.eq(back2[1].get("rejoined"), true, "remembered kick rejoins")
+	t.eq(host.get_player(rid2).meta.get("n"), 5, "remembered kick restores meta")
+	(back2[0] as PMCTestWs).close()
+
 	t.section("replaced")
 	log.clear()
 	var first := await _join(t)

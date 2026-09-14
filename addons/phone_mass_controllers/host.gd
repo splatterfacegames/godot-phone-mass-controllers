@@ -484,8 +484,11 @@ func broadcast(data, filter: Callable = Callable()) -> void:
 
 
 ## Removes a player: sends [code]pmc.kicked[/code], closes with 4001 and emits [signal player_left] with "kicked".
-## With [param ban], the token is refused ([code]banned[/code]) until the host stops or [method clear_bans] runs.
-func kick(to, reason := "", ban := false) -> void:
+## No tombstone is kept by default: a kicked token that reconnects becomes a new player (new id, empty meta).
+## With [param remember], a tombstone is left (subject to [member remember_seconds]) so the same token rejoins
+## with its id and meta intact. With [param ban], the token is refused ([code]banned[/code]) until the host
+## stops or [method clear_bans] runs.
+func kick(to, reason := "", ban := false, remember := false) -> void:
 	var p := _resolve(to)
 	if p == null:
 		return
@@ -496,7 +499,7 @@ func kick(to, reason := "", ban := false) -> void:
 		_detach(c)
 		_send_json(c, {"t": "pmc.kicked", "reason": reason})
 		_ws_close(c, 4001, "kicked")
-	_remove_player(p, "kicked")
+	_remove_player(p, "kicked", remember)
 
 
 ## Forgets all bans made with [method kick].
@@ -1141,7 +1144,7 @@ func _player_socket_lost(p: PMCPlayer) -> void:
 		_remove_player(p, "timeout")
 
 
-func _remove_player(p: PMCPlayer, reason: String) -> void:
+func _remove_player(p: PMCPlayer, reason: String, tombstone := false) -> void:
 	if _players.get(p.id) != p:
 		return
 	_players.erase(p.id)
@@ -1152,7 +1155,7 @@ func _remove_player(p: PMCPlayer, reason: String) -> void:
 		_ws_close(c, 1000, reason)
 	p.connected = false
 	p.grace_deadline_msec = 0
-	if reason == "timeout" and remember_seconds > 0.0:
+	if (reason == "timeout" or tombstone) and remember_seconds > 0.0:
 		_tombstones[p.token] = {
 			"id": p.id, "name": p.name, "profile": p.profile, "meta": p.meta,
 			"expires_msec": Time.get_ticks_msec() + int(remember_seconds * 1000.0),
