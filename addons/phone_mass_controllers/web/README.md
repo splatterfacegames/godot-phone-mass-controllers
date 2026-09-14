@@ -67,5 +67,7 @@
   `false` there. Use `feedback()` for a visual/audio fallback.
 - Wake lock needs a secure context. On a plain `http://192.168.x.x` LAN page it's unavailable, so
   `keepScreenOn()` plays a hidden looping clip after the first tap instead. Over the https tunnel the real API works.
-- Backgrounded tabs and locked screens freeze or kill WebSockets, especially on iOS. The client recovers when the page
-  comes back, and the host keeps the player for `grace_seconds`.
+- Backgrounded tabs and locked screens freeze or kill WebSockets, especially on iOS and Android battery savers.
+  The client recovers when the page comes back, and the host keeps the player for `grace_seconds` —
+  60–120 s is a good value for pocketed phones. Pair it with `keepScreenOn()` so the screen doesn't sleep mid-game.
+- See [docs/mobile-browsers.md](../../../docs/mobile-browsers.md) for the full list of phone-browser caveats.

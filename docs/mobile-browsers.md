@@ -26,6 +26,21 @@ tactile-ish feedback instead: it vibrates where supported and otherwise flashes 
 unlocks its AudioContext on the first `pointerdown` — call `feedback()` in response to taps and the
 click will be ready.
 
+## Backgrounded and locked phones drop their socket
+
+iOS — and Android with battery savers on — freezes or kills a page's WebSocket when the tab goes to
+the background or the phone locks. Two safety nets cover it:
+
+- **pmc.js reconnects** the moment the page becomes visible again, and treats a socket that has gone
+  16 s without a pong as dead.
+- **The host's `grace_seconds`** keeps the player in the game meanwhile — reconnects inside the
+  window resume the same player (same id, same meta). For a phone party game set it to 60–120 s so a
+  pocketed phone isn't "gone"; the demo uses 90.
+
+In your UI, distinguish "socket lost" from "left": a `disconnected` player inside the grace window
+is reconnecting (the demo dims their card and shows *reconnecting…*), while an explicit `leave`
+removes them. And pair `grace_seconds` with `keepScreenOn()` so screens don't sleep mid-round.
+
 ## Screen wake lock needs a secure context
 
 The Screen Wake Lock API only works on `https://` or localhost, so on a plain `http://192.168.x.x`

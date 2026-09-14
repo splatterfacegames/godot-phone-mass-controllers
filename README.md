@@ -84,6 +84,18 @@ Quick Tunnels are free and account-less, but the URL changes every run and has n
 the host requires a join code and rate-limits bad codes per client IP (via `CF-Connecting-IP`). See the
 [open issues](../../issues?q=label%3Aoutside-lan) for limitations and alternatives (named tunnels, Tailscale Funnel, relays).
 
+## Mobile browser caveats
+
+Phone browsers have quirks desktop ones don't — worth knowing before you ship a party game:
+
+- **iOS has no vibration API.** `feedback(kind)` falls back to a screen flash + WebAudio click.
+- **Locked/backgrounded phones lose the socket.** The SDK reconnects on return; keep `grace_seconds` at
+  60–120 s so a pocketed phone isn't "gone", and call `keepScreenOn()` so it doesn't lock mid-game.
+- **Wake lock needs a secure context** — unavailable on plain `http://` LAN pages. `keepScreenOn()`
+  falls back to a muted looping clip; the https tunnel is the real fix.
+
+Details and workarounds: [docs/mobile-browsers.md](docs/mobile-browsers.md).
+
 ## Demo: Buzzer Party
 
 `godot --path .` runs `demo/main.tscn`. Each phone privately gets a secret symbol; the TV flashes symbols; first to buzz on

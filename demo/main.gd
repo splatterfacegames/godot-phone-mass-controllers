@@ -69,6 +69,7 @@ func _ready() -> void:
 	host.port = int(args.get("port", "8080"))
 	host.join_code = args.get("code", "")
 	host.admin_pin = args.get("pin", "%04d" % (randi() % 10000))
+	host.grace_seconds = 90.0 # a pocketed/locked phone stays in the game ~90 s (recommended 60–120)
 	host.tunnel_allow_download = true # the "Share outside LAN" button is an explicit opt-in
 	add_child(host)
 
