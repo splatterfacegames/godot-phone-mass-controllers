@@ -66,8 +66,9 @@ func _on_message(player: PMCPlayer, data) -> void:
 </script>
 ```
 
-**Exports:** add your controller folder's files (`*.html, *.js, *.css`, and any images you want served raw) to the
-export preset's *non-resource* filter, so they're packed as-is instead of being imported.
+**Exports:** the editor plugin packs every served folder (`web/` SDK, `res://controller`, and any `res://` dir set as
+`controller_dir` or passed to `serve_directory`) as raw files automatically — no export-filter fiddling needed.
+See [docs/exporting.md](docs/exporting.md) for what's covered and the manual fallback.
 
 ## Outside the LAN
 
@@ -77,7 +78,8 @@ host.tunnel_state_changed.connect(func(state, url): print(state, " ", url))
 host.start_tunnel()                    # ~10 s later: join_url_changed → the QR now shows https://…trycloudflare.com/?code=ABCD
 ```
 
-The editor dock (*Phone Controllers*, bottom panel) can pre-download `cloudflared` and run a test tunnel.
+The editor dock (*Phone Controllers*, bottom panel) can pre-download `cloudflared` and run a test tunnel. While you
+debug (F5), it shows the running game's host status — port, join URL + QR, connected players and tunnel state.
 Quick Tunnels are free and account-less, but the URL changes every run and has no uptime guarantee. While a tunnel is up,
 the host requires a join code and rate-limits bad codes per client IP (via `CF-Connecting-IP`). See the
 [open issues](../../issues?q=label%3Aoutside-lan) for limitations and alternatives (named tunnels, Tailscale Funnel, relays).

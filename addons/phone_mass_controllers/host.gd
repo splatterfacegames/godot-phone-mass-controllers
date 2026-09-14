@@ -1,3 +1,4 @@
+@icon("res://addons/phone_mass_controllers/editor/icon_host.svg")
 class_name PMCHost
 extends Node
 ## Hosts phone controllers: an HTTP/1.1 + WebSocket server on one TCP port, plus player sessions.
@@ -170,6 +171,10 @@ func _ready() -> void:
 	set_process(_running and auto_poll)  # start() may have been called before the node entered the tree
 	if autostart and not Engine.is_editor_hint():
 		start()
+	# devin-pmc-editor (#22): report live status to the "Phone Controllers" dock in editor runs.
+	var reporter := "res://addons/phone_mass_controllers/editor/ingame_reporter.gd"
+	if OS.has_feature("editor") and not Engine.is_editor_hint() and EngineDebugger.is_active() and ResourceLoader.exists(reporter):
+		add_child(load(reporter).new(self))
 
 
 func _process(_delta: float) -> void:

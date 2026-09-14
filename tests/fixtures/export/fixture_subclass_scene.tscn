@@ -1,0 +1,7 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tests/fixtures/export/subclass_fixture.gd" id="1_s"]
+
+[node name="SubHost" type="Node"]
+script = ExtResource("1_s")
+controller_dir = "res://tests/fixtures/export/sub_home"
