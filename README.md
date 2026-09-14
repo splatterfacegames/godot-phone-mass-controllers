@@ -83,7 +83,9 @@ host.start_tunnel()                    # ~10 s later: join_url_changed → the Q
 The editor dock (*Phone Controllers*, bottom panel) can pre-download `cloudflared` and run a test tunnel. While you
 debug (F5), it shows the running game's host status — port, join URL + QR, connected players and tunnel state.
 Quick Tunnels are free and account-less, but the URL changes every run and has no uptime guarantee. While a tunnel is up,
-the host requires a join code and rate-limits bad codes per client IP (via `CF-Connecting-IP`). See the
+the host auto-generates a 6-letter join code (carried in the QR's `?code=`), rate-limits bad codes per client IP
+(via `CF-Connecting-IP`), and keeps `/pmc/info.json` + `/pmc/qr.png` (which reveal the URL) loopback-or-code only.
+See [docs/security.md](docs/security.md) for the hardening model and the
 [open issues](../../issues?q=label%3Aoutside-lan) for limitations and alternatives (named tunnels, Tailscale Funnel, relays).
 
 ## Mobile browser caveats
@@ -112,11 +114,30 @@ Doc comments on every public member (`##`) show up in Godot's built-in help. See
 protocol and [addons/phone_mass_controllers/web/README.md](addons/phone_mass_controllers/web/README.md) for `pmc.js`.
 
 **`PMCHost`**:
-- **Settings:** `port`/`port_search`, `controller_dir`, `join_code`, `max_players`, `grace_seconds`, `remember_seconds`, `admin_pin`, `advertise_url`, plus limits (`max_connections_per_address`, `join_code_max_failures`, header/body/message sizes, timeouts).
-- **Signals:** `player_joined`, `player_rejoined`, `player_disconnected`, `player_left(player, reason)`, `player_updated`, `admin_authenticated`, `message_received(player, data)`, `join_url_changed`, `tunnel_state_changed`.
-- **Methods:** `start()`, `stop()`, `send()`, `broadcast()`, `kick()`, `players()`, `get_player()`, `join_url()`, `lan_addresses()`, `qr_texture()`, `add_route()`, `serve_directory()`, `start_tunnel()`, `stop_tunnel()`, `get_stats()`.
+- **Settings:** `port`/`port_search`, `controller_dir`, `join_code`, `max_players`, `grace_seconds`, `remember_seconds`, `admin_pin`, `advertise_url`, `no_joins_hint_seconds`, `io_thread_enabled`, plus limits (`max_connections_per_address`, `join_code_max_failures`, `admin_pin_max_failures`, `check_origin`/`allowed_origins`, header/body/message sizes, timeouts).
+- **Signals:** `player_joined`, `player_rejoined`, `player_disconnected`, `player_left(player, reason)`, `player_updated`, `admin_authenticated`, `message_received(player, data)`, `join_url_changed`, `no_joins_hint`, `tunnel_state_changed`.
+- **Methods:** `start()`, `stop()`, `send()`, `broadcast()`, `kick()`, `players()`, `get_player()`, `join_url()`, `lan_addresses()`, `qr_texture()`, `add_route()`, `serve_directory()`, `require_player()`, `start_tunnel()`, `stop_tunnel()`, `get_stats()`.
 
-**`PMCPlayer`**: `id`, `token`, `name`, `profile`, `connected`, `is_admin`, `meta` (your per-player game data, kept across rejoin), `remote_address`.
+**`PMCPlayer`**: `id`, `token`, `name`, `profile`, `connected`, `is_admin`, `meta` (your per-player game data, kept across rejoin), `remote_address`, `rtt_ms`.
+
+`send()`/`broadcast()` deliver in order **per player**, not across players — a frame queued for socket A and
+then one for socket B can reach B first, so don't let game logic depend on cross-player arrival order.
+
+## Troubleshooting
+
+**The QR opens on the phone but the page never loads.** Guest Wi-Fi, hotels, campuses and some mesh
+routers isolate clients from each other ("AP/client isolation"), and captive-portal networks do the same —
+the phone is on the Wi-Fi but can't reach `http://<host-lan-ip>:<port>`. Workarounds: `host.start_tunnel()`
+(phones join over the internet), run the game behind a phone hotspot, or turn off the router's isolation
+setting. To catch this live, set `host.no_joins_hint_seconds` — if the join URL sits unjoined that long,
+the `no_joins_hint` signal fires so the game can suggest the tunnel.
+
+**The join URL picks the wrong network adapter.** `join_url()` uses the best-scoring private **IPv4**
+address from `host.lan_addresses()` — real Ethernet/Wi-Fi adapters rank above virtual and VPN ones
+(vEthernet/WSL/Hyper-V, VirtualBox, Tailscale, Docker, ...). It's a heuristic, and IPv6-only networks
+aren't supported by the join URL. If it picks wrong on your machine, set `host.advertise_url` explicitly
+and please report the `host.lan_addresses()` output in an issue. (The result is cached 30 s because
+`IP.get_local_interfaces()` takes several milliseconds on Windows.)
 
 ## Performance
 
@@ -130,6 +151,9 @@ Measured over loopback on a Xeon W-2135 (Windows 11), host at 60 fps, main-threa
 | 200 × 60 msg/s | 9545 | 0 | 69 / 197 ms | 9.9 / 17.7 ms | 15.3 ms |
 
 A normal party game is far below the first busy row. Prefer binary frames for big payloads, since JSON parsing costs about 60 ms/MiB.
+`host.io_thread_enabled = true` (before `start()`) moves accept/read/write/frame-decode to a worker thread —
+the main thread then only applies complete requests and decoded events. See [docs/performance.md](docs/performance.md)
+for tuning, the burst-join backlog limit, and the io-thread contract.
 
 ## Tests
 

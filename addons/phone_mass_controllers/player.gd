@@ -27,6 +27,9 @@ var last_seen_msec := 0
 var grace_deadline_msec := 0
 ## Remote IP of the current (or last) socket. Behind a tunnel this is the tunnel's local address.
 var remote_address := ""
+## Rolling average of the WebSocket ping→pong round trip, in milliseconds. 0 until the first heartbeat
+## ping is answered (see [member PMCHost.heartbeat_seconds]).
+var rtt_ms := 0.0
 
 ## Internal: the attached PMCConnection, or null.
 var _conn: RefCounted = null

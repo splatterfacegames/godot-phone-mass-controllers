@@ -44,6 +44,8 @@ var player_id := 0
 var hello_deadline_msec := 0
 ## Heartbeat pings sent without any inbound frame since.
 var pings_unanswered := 0
+## When the last heartbeat ping was queued (ticks msec; 0 = none in flight). Used for player RTT.
+var ping_sent_msec := 0
 ## Next heartbeat tick.
 var next_ping_msec := 0
 ## Whether we've sent a close frame.
@@ -64,6 +66,21 @@ var slot := 0
 var client_address := ""
 ## Address this connection is counted under in the host's per-address table ("" if not counted).
 var counted_address := ""
+
+# I/O-thread handoff ([member PMCHost.io_thread_enabled]). The fields below cross the thread boundary and
+# are guarded by io_mutex: the host writes, the worker reads and applies. Everything else is owned by
+# whichever side services the socket.
+var io_mutex := Mutex.new()
+## Worker: close the socket next pass (queued output is dropped, as with [method close_now]).
+var close_requested := false
+## Worker: apply [method upgrade_to_ws] next pass, using the _up_* parameters.
+var upgrade_pending := false
+## Worker-maintained snapshot of "input partially received" for the host's HTTP header timeout.
+var io_partial_in := false
+var _up_max_message_bytes := 0
+var _up_now_msec := 0
+var _up_hello_timeout_msec := 0
+var _up_heartbeat_msec := 0
 
 var _in := PackedByteArray()
 var _in_off := 0
@@ -103,17 +120,26 @@ func poll_status() -> bool:
 
 ## Bytes queued but not yet written (excluding the rest of a streamed file).
 func out_pending() -> int:
-	return _out.size() - _out_off
+	io_mutex.lock()
+	var n := _out.size() - _out_off
+	io_mutex.unlock()
+	return n
 
 
 ## Whether any output (bytes or a file) is still pending.
 func has_pending_output() -> bool:
-	return _out.size() > _out_off or _file != null
+	io_mutex.lock()
+	var r := _out.size() > _out_off or _file != null
+	io_mutex.unlock()
+	return r
 
 
 ## Whether a file body is being streamed.
 func is_streaming() -> bool:
-	return _file != null
+	io_mutex.lock()
+	var r := _file != null
+	io_mutex.unlock()
+	return r
 
 
 ## Bytes received but not yet consumed.
@@ -125,7 +151,11 @@ func buffered_in() -> int:
 
 ## Queues bytes for sending.
 func queue(bytes: PackedByteArray) -> void:
-	if mode == Mode.CLOSED or bytes.is_empty():
+	if bytes.is_empty():
+		return
+	io_mutex.lock()
+	if mode == Mode.CLOSED or close_requested:
+		io_mutex.unlock()
 		return
 	if _out_off == _out.size():
 		_out = bytes  # Packed arrays are copy-on-write, so sharing one broadcast frame is free.
@@ -133,17 +163,57 @@ func queue(bytes: PackedByteArray) -> void:
 		last_tx_msec = Time.get_ticks_msec()
 	else:
 		_out.append_array(bytes)
+	io_mutex.unlock()
 
 
 ## Streams [param length] bytes from the already-positioned [param file] after the queued bytes.
 func start_file(file: FileAccess, length: int) -> void:
+	io_mutex.lock()
 	_file = file
 	_file_remaining = length
 	last_tx_msec = Time.get_ticks_msec()
+	io_mutex.unlock()
+
+
+## (I/O thread) Ask the worker to close the socket next pass. Queued output is dropped, as with [method close_now].
+func request_close(reason := "") -> void:
+	io_mutex.lock()
+	if mode != Mode.CLOSED and not close_requested:
+		close_requested = true
+		if close_reason == "":
+			close_reason = reason
+	io_mutex.unlock()
+
+
+## (I/O thread) Close once the queued output is written (like [member close_after_flush]).
+func close_when_flushed(reason := "") -> void:
+	io_mutex.lock()
+	close_after_flush = true
+	if close_reason == "":
+		close_reason = reason
+	io_mutex.unlock()
+
+
+## (I/O thread) Ask the worker to switch to WS mode next pass.
+func request_upgrade(p_max_message_bytes: int, now_msec: int, hello_timeout_msec: int, heartbeat_msec: int) -> void:
+	io_mutex.lock()
+	upgrade_pending = true
+	_up_max_message_bytes = p_max_message_bytes
+	_up_now_msec = now_msec
+	_up_hello_timeout_msec = hello_timeout_msec
+	_up_heartbeat_msec = heartbeat_msec
+	io_mutex.unlock()
 
 
 ## Writes up to [param max_bytes]. Returns the bytes written.
 func flush(max_bytes: int) -> int:
+	io_mutex.lock()
+	var n := _flush_locked(max_bytes)
+	io_mutex.unlock()
+	return n
+
+
+func _flush_locked(max_bytes: int) -> int:
 	var written := 0
 	while mode != Mode.CLOSED and written < max_bytes:
 		if _out_off >= _out.size():
@@ -152,7 +222,7 @@ func flush(max_bytes: int) -> int:
 			var n := mini(CHUNK, _file_remaining)
 			var chunk := _file.get_buffer(n)
 			if chunk.size() == 0 and n > 0:
-				close_now("file read error")
+				_close_now_locked("file read error")
 				break
 			_file_remaining -= chunk.size()
 			if _file_remaining <= 0:
@@ -164,7 +234,7 @@ func flush(max_bytes: int) -> int:
 		var piece := _out if (_out_off == 0 and end == _out.size()) else _out.slice(_out_off, end)
 		var r := peer.put_partial_data(piece)
 		if r[0] != OK:
-			close_now("write error")
+			_close_now_locked("write error")
 			break
 		var sent: int = r[1]
 		if sent > 0:
@@ -179,8 +249,8 @@ func flush(max_bytes: int) -> int:
 			_out_off = 0
 		if sent < piece.size():
 			break
-	if mode != Mode.CLOSED and close_after_flush and not has_pending_output():
-		close_now("done")
+	if mode != Mode.CLOSED and close_after_flush and not (_out.size() > _out_off or _file != null):
+		_close_now_locked("done")
 	return written
 
 
@@ -283,10 +353,17 @@ func upgrade_to_ws(max_message_bytes: int, now_msec: int, hello_timeout_msec: in
 
 ## Closes the socket immediately.
 func close_now(reason := "") -> void:
+	io_mutex.lock()
+	_close_now_locked(reason)
+	io_mutex.unlock()
+
+
+func _close_now_locked(reason := "") -> void:
 	if mode == Mode.CLOSED:
 		return
 	mode = Mode.CLOSED
-	close_reason = reason
+	if close_reason == "":
+		close_reason = reason
 	if _file != null:
 		_file.close()
 		_file = null
@@ -295,6 +372,12 @@ func close_now(reason := "") -> void:
 	_in = PackedByteArray()
 	_in_off = 0
 	peer.disconnect_from_host()
+
+
+## (I/O thread) Applies a pending [method request_upgrade]. Called by the worker while it holds [member io_mutex].
+func apply_upgrade() -> void:
+	upgrade_to_ws(_up_max_message_bytes, _up_now_msec, _up_hello_timeout_msec, _up_heartbeat_msec)
+	upgrade_pending = false
 
 
 func _compact_in() -> void:

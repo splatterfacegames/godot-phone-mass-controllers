@@ -178,7 +178,9 @@ func _messaging(t) -> void:
 	await wa.send_json({"t": "pmc.ping", "c": 12345.5})
 	var pong := await wa.wait_json("pmc.pong")
 	t.eq(pong.get("c"), 12345.5, "pong echoes c")
-	t.ok(abs(float(pong.get("s", 0)) - Time.get_ticks_msec()) < 1000, "pong s is server ms")
+	var epoch_ms := Time.get_unix_time_from_system() * 1000.0
+	t.ok(absf(float(pong.get("s", 0)) - epoch_ms) < 2000, "pong s is epoch ms")
+	t.ok(absf(float(a[1].get("server_ms", 0)) - epoch_ms) < 60000, "welcome server_ms is epoch ms")
 
 	await wb.send_json({"t": "pmc.profile", "name": "Bee", "profile": {"hat": 1}})
 	await _wait_seen(t, "updated", idb)
@@ -380,6 +382,19 @@ func _kick_replace_leave(t) -> void:
 	host.kick(int(g[1].id))
 	t.eq((await _wait_seen(t, "left", int(g[1].id)))[2], "kicked", "kick a player in grace")
 
+	t.section("kick(remember)")
+	var r2 := await _join(t, {"name": "Keep"})
+	var rid2 := int(r2[1].id)
+	var tok2: String = r2[1].token
+	host.get_player(rid2).meta["n"] = 5
+	host.kick(rid2, "afk", false, true)
+	t.eq((await _wait_seen(t, "left", rid2))[2], "kicked", "remembered kick still reports kicked")
+	var back2 := await _join(t, {"token": tok2})
+	t.eq(int(back2[1].get("id", -1)), rid2, "remembered kick restores id")
+	t.eq(back2[1].get("rejoined"), true, "remembered kick rejoins")
+	t.eq(host.get_player(rid2).meta.get("n"), 5, "remembered kick restores meta")
+	(back2[0] as PMCTestWs).close()
+
 	t.section("replaced")
 	log.clear()
 	var first := await _join(t)
@@ -435,6 +450,7 @@ func _heartbeat(t) -> void:
 		alive_ws._drain()
 		return false, 0.8)
 	t.ok(not alive_ws.sock.closed and host.get_player(int(alive[1].id)).connected, "pong-answering socket stays open")
+	t.ok(host.get_player(int(alive[1].id)).rtt_ms > 0.0, "rtt_ms measured from heartbeat pong")
 	alive_ws.close()
 	host.heartbeat_seconds = 0.0
 	await t.wait(0.1)
@@ -563,11 +579,11 @@ func _qr_tunnel(t) -> void:
 	t.eq(states.map(func(x): return x[0]), ["starting", "ready"], "states forwarded")
 	t.eq(states[1][1], "https://random-words.trycloudflare.com", "ready carries URL")
 	t.eq(host.advertise_url, "https://random-words.trycloudflare.com", "advertise_url set")
-	var code_ok := host.join_code.length() == 4
+	var code_ok := host.join_code.length() == 6
 	for ch in host.join_code:
 		if ch < "A" or ch > "Z":
 			code_ok = false
-	t.ok(code_ok, "4-letter join code generated (%s)" % host.join_code)
+	t.ok(code_ok, "6-letter join code generated while tunneled (%s)" % host.join_code)
 	t.eq(urls.size(), 1, "one join_url_changed on ready")
 	t.eq(host.join_url(), "https://random-words.trycloudflare.com/?code=" + host.join_code, "tunnel join URL")
 	host.stop_tunnel()

@@ -42,6 +42,21 @@ One TCP port serves both HTTP/1.1 and WebSocket (RFC 6455), so a single tunnel h
   Per-frame I/O budget, so a slow phone can't stall the game.
 - `bind_address` default `"*"`. `port` default 8080. If busy, try the next port up to `port + port_search`
   (default 20), and emit/return the actual port.
+- Delivery order is guaranteed **per player (per socket), not across players**: `send`/`broadcast` queue
+  frames that are flushed in the host's round-robin service order, so a frame queued for socket A and then
+  one for socket B can reach B first. Tests and game logic must not rely on cross-player arrival order.
+
+Known limits of the built-in server (deliberate scope cuts — use the Cloudflare tunnel for `https`/`wss`):
+
+- **No TLS.** Plain `http`/`ws` on the LAN. `start_tunnel()` is the supported way to get TLS.
+- **No permessage-deflate** — extensions are never negotiated.
+- **Request bodies:** `Content-Length` only; `Transfer-Encoding: chunked` gets 501.
+- **Caching:** no `ETag`/`If-None-Match`. `Range` supports a single range; multi-ranges are ignored (200).
+- **Symlinks** in served trees are resolved and confined to the served root (403 on escape).
+- **Reverse proxies:** only `CF-Connecting-IP` is trusted, and only while the tunnel is up. `Forwarded`/
+  `X-Forwarded-For` are ignored, so per-address limits behind another proxy see the proxy's address.
+- **Origin:** not checked on the WS upgrade by default; `check_origin` + `allowed_origins` opt in.
+- The join URL is IPv4-only (see §3 `lan_addresses`).
 
 ## 2. Wire protocol
 
@@ -64,19 +79,28 @@ Host → client:
 
 | t | fields | notes |
 |---|--------|-------|
-| `pmc.welcome` | `id:int`, `token:string`, `name`, `profile`, `rejoined:bool`, `admin:bool`, `server_ms:int`, `join_url:string` | `server_ms` is host clock in epoch ms |
+| `pmc.welcome` | `id:int`, `token:string`, `name`, `profile`, `rejoined:bool`, `admin:bool`, `server_ms:int` (epoch ms UTC), `join_url:string` | |
 | `pmc.reject` | `code:string` (`bad_code`, `full`, `version`, `banned`, `bad_hello`), `reason:string` | then close 4000 |
-| `pmc.pong` | `c`, `s:int` (host epoch ms) | clock-offset + RTT estimate |
-| `pmc.auth` | `ok:bool` | 5 failures → 30 s lockout per connection |
+| `pmc.pong` | `c`, `s:int` (epoch ms UTC) | clock-offset estimate; `s` is wall-clock epoch ms, so `serverNow()` is comparable to `turn_ends_at_ms`-style deadlines stamped from `Time.get_unix_time_from_system() * 1000` |
+| `pmc.auth` | `ok:bool`, `locked_ms?:int`, `disabled?:bool` | 5 failures → 30 s per connection; 20 per address → 60 s; `admin_pin_max_failures` (default 20) across all addresses disables the PIN until restart (`disabled:true`) |
 | `pmc.kicked` | `reason:string` | then close 4001 |
 | `pmc.replaced` | | same token connected elsewhere, then close 4002 |
 | `pmc.moved` | `url:string` | join URL changed (ephemeral tunnel). https→https pages may auto-follow; others should ask for a re-scan |
 | `msg` | `d:any` | game message |
 
+HTTP auth for custom routes: after join, pmc.js sets a `pmc_token` cookie (value = the rejoin token).
+`require_player(req)` maps `?t=<token>` or that cookie to the joined player; serve nothing private without it.
+
+While a tunnel is up the host is public: auto-generated join codes are 6 chars (24^6), and
+`/pmc/info.json` + `/pmc/qr.png` (which reveal the join URL) answer only to loopback or a request
+carrying a valid `?code=`. The controller page and `/pmc/pmc.js` stay public — phones need them to join.
+
 Identity: the token is a random 128-bit hex string issued by the host. The same token reconnecting within
 `grace_seconds` resumes the same `PMCPlayer` (same id, meta preserved) and emits `player_rejoined`. After grace
 expires the player is removed with `player_left(player, "timeout")`. A token seen after removal starts
 a new player, unless `remember_seconds` (default 3600) keeps a tombstone so the id and meta come back.
+Tombstones are written only on `"timeout"` removal (and on `kick(..., remember := true)`) — a plain
+`kick()` or `pmc.leave` drops the token, so the player comes back as someone new (new id, empty meta).
 
 ## 3. GDScript API
 
@@ -96,6 +120,11 @@ class_name PMCHost extends Node
 @export var advertise_url := ""                       # override join URL (else best LAN IPv4, or tunnel URL)
 @export var max_message_bytes := 1 << 20
 @export var autostart := false
+@export var no_joins_hint_seconds := 0.0                  # >0: emit no_joins_hint if the URL sits unjoined that long
+@export var io_thread_enabled := false                  # worker thread does accept/read/write/frame decode; set before start()
+# limits (selected): max_connections, max_connections_per_address, join_code_max_failures,
+# join_code_block_seconds, admin_pin_max_failures (global PIN budget, default 20), header/body sizes, timeouts,
+# check_origin + allowed_origins (opt-in WS Origin allow-list)
 
 signal started(port: int)
 signal stopped
@@ -107,6 +136,7 @@ signal player_updated(player: PMCPlayer)             # name/profile changed
 signal admin_authenticated(player: PMCPlayer)
 signal message_received(player: PMCPlayer, data)     # Variant from JSON `d`, or PackedByteArray
 signal join_url_changed(url: String)
+signal no_joins_hint                                 # no joins within no_joins_hint_seconds of the URL going up (0 = off)
 
 func start() -> Error
 func stop() -> void
@@ -120,9 +150,10 @@ func players(include_disconnected := true) -> Array[PMCPlayer]
 func get_player(id: int) -> PMCPlayer
 func send(to, data) -> void                           # to: PMCPlayer | int; data: Dictionary/Array/String/number (JSON msg) or PackedByteArray (binary)
 func broadcast(data, filter: Callable = Callable()) -> void   # filter(player) -> bool
-func kick(to, reason := "") -> void
+func kick(to, reason := "", ban := false, remember := false) -> void   # remember: keep a tombstone so the token rejoins with id+meta; ban: refuse the token
 func add_route(prefix: String, handler: Callable) -> void     # handler(req: PMCHttpRequest) -> PMCHttpResponse or null (fall through)
-func serve_directory(prefix: String, dir: String) -> void     # e.g. serve_directory("/assets/", "C:/game/assets") — absolute or res:// or user://
+func serve_directory(prefix: String, dir: String, players_only := false) -> void  # players_only: require a joined player's token (?t= or pmc_token cookie) else 403
+func require_player(req: PMCHttpRequest) -> PMCPlayer          # player for ?t=<token> or the pmc_token cookie, else null → respond 403
 func start_tunnel() -> void                           # one-click outside-LAN (see §5); sets advertise URL on success
 func stop_tunnel() -> void
 signal tunnel_state_changed(state: String, url: String)       # "downloading" | "starting" | "ready" | "failed" | "stopped"
@@ -132,6 +163,7 @@ var id: int; var token: String; var name: String; var profile: Dictionary
 var connected: bool; var is_admin: bool; var meta: Dictionary
 var joined_msec: int; var last_seen_msec: int; var grace_deadline_msec: int
 var remote_address: String
+var rtt_ms: float      # rolling average of the WS heartbeat ping→pong round trip (0 until first sample)
 ```
 
 Optional helpers extracted from a real party game's lobby (pure logic, no networking, fully unit-tested):
@@ -194,7 +226,8 @@ pmc.rttMs;                            // rolling avg round-trip ms
 3. Run `cloudflared tunnel --no-autoupdate --url http://127.0.0.1:<port>` via `OS.execute_with_pipe`. Read stderr
    for `https://<random>.trycloudflare.com` and wait for the "Registered tunnel connection" line.
 4. On ready: `advertise_url` = tunnel URL, `join_url_changed`, QR regenerates. **If `join_code` is empty, auto-generate
-   a 4-letter code** (the host is now on the public internet).
+   a 6-letter code** (24^6 ≈ 191M — the host is now on the public internet). The QR and `join_url()` carry it
+   as `?code=`; while tunneled, `/pmc/info.json` and `/pmc/qr.png` answer only to loopback or a valid `?code=`.
 5. Kill the process on `stop_tunnel()`, host `stop()`, and `NOTIFICATION_WM_CLOSE_REQUEST` / exit.
    Surface failures (no network, download blocked, process exit) through `tunnel_state_changed("failed", reason)`.
 
