@@ -1,24 +1,71 @@
 @echo off
 rem Fake cloudflared for PMCTunnel tests (Windows). Mode comes from PMC_FAKE_CLOUDFLARED_MODE:
-rem ok | slow | no_url | error_exit | exit_after_ready. Replays real-looking logs from logs\ to stderr.
-setlocal
+rem ok | slow | no_url | error_exit | error_429_once | exit_after_ready | quic_fail |
+rem unregister | unregister_recover | named_ok | needs_config. Replays logs from logs\ to stderr.
+rem error_429_once writes/reads a marker at %PMC_FAKE_STATE_FILE% to fail only on the first run.
+setlocal EnableDelayedExpansion
 set "LOGS=%~dp0logs"
+set "ARGS=%*"
 if /i "%~1"=="--version" (
   echo cloudflared version 2025.8.1 ^(built 2025-08-01-0000 UTC^)
   exit /b 0
 )
-if not "%~1"=="tunnel" goto badargs
-if not "%~2"=="--no-autoupdate" goto badargs
-if not "%~3"=="--url" goto badargs
-echo %~4| findstr /b /c:"http://127.0.0.1:" >nul || goto badargs
 set "MODE=%PMC_FAKE_CLOUDFLARED_MODE%"
 if "%MODE%"=="" set "MODE=ok"
+set "HTTP2="
+set "HASCFG="
+set "NAMED="
+echo %ARGS%| findstr /c:"--protocol http2" >nul && set "HTTP2=1"
+echo %ARGS%| findstr /c:"--config " >nul && set "HASCFG=1"
+echo %ARGS%| findstr /c:"run --token" >nul && set "NAMED=1"
+echo %ARGS%| findstr /c:"run " >nul && set "HASRUN=1"
+echo %ARGS%| findstr /c:"--no-autoupdate" >nul || goto badargs
+if not defined HASRUN (
+  echo %ARGS%| findstr /c:"--url http://127.0.0.1:" >nul || goto badargs
+)
+if "%MODE%"=="needs_config" if not defined HASCFG (
+  echo ERR this fixture requires --config to be passed 1>&2
+  exit /b 1
+)
+if "%MODE%"=="named_ok" (
+  if not defined NAMED (
+    echo ERR expected 'run --token' in args 1>&2
+    exit /b 2
+  )
+  type "%LOGS%\named_registered.log" 1>&2
+  goto idle
+)
+if "%MODE%"=="named_local" (
+  if not defined HASRUN (
+    echo ERR expected 'run' in args 1>&2
+    exit /b 2
+  )
+  type "%LOGS%\named_registered.log" 1>&2
+  goto idle
+)
+if "%MODE%"=="error_429_once" (
+  if not exist "%PMC_FAKE_STATE_FILE%" (
+    echo x>"%PMC_FAKE_STATE_FILE%"
+    type "%LOGS%\error_429.log" 1>&2
+    exit /b 1
+  )
+)
 if "%MODE%"=="error_exit" (
   type "%LOGS%\error_429.log" 1>&2
   exit /b 1
 )
 if "%MODE%"=="no_url" (
   type "%LOGS%\no_url.log" 1>&2
+  goto idle
+)
+if "%MODE%"=="quic_fail" if not defined HTTP2 (
+  type "%LOGS%\quic_fail.log" 1>&2
+  goto idle
+)
+if "%MODE%"=="rotating_url" (
+  if exist "%PMC_FAKE_STATE_FILE%" (set "U=second-words-here") else (echo x>"%PMC_FAKE_STATE_FILE%" & set "U=first-words-here")
+  echo 2026-09-14T09:00:00Z INF Your quick Tunnel: https://!U!.trycloudflare.com 1>&2
+  type "%LOGS%\registered.log" 1>&2
   goto idle
 )
 if "%MODE%"=="slow" ping -n 4 127.0.0.1 >nul
@@ -28,6 +75,16 @@ type "%LOGS%\registered.log" 1>&2
 if "%MODE%"=="exit_after_ready" (
   ping -n 2 127.0.0.1 >nul
   exit /b 0
+)
+if "%MODE%"=="unregister" (
+  ping -n 3 127.0.0.1 >nul
+  type "%LOGS%\unregistered.log" 1>&2
+)
+if "%MODE%"=="unregister_recover" (
+  ping -n 3 127.0.0.1 >nul
+  type "%LOGS%\unregistered.log" 1>&2
+  ping -n 4 127.0.0.1 >nul
+  type "%LOGS%\registered.log" 1>&2
 )
 :idle
 for /l %%i in (1,1,120) do ping -n 2 127.0.0.1 >nul
