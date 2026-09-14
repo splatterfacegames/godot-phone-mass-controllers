@@ -58,6 +58,15 @@ describe('pmc.js SDK (real Godot host)', { timeout: 120000 }, () => {
     await p.ctx.close();
   });
 
+  it('feedback() picks a working channel and never throws', async () => {
+    const p = await newPhone(browser, 'Flo');
+    await join(p, host, { name: 'Flo' });
+    const modes = await p.page.evaluate(() => import('/pmc/pmc.js').then((m) =>
+      ['buzz', 'success', 'error', 'unknown-kind'].map((k) => m.feedback(k))));
+    for (const mode of modes) assert.ok(mode === 'vibrate' || mode === 'flash', `mode ${mode}`);
+    await p.ctx.close();
+  });
+
   it('the demo buzz carries an `at` timestamp', async () => {
     const p = await newPhone(browser, 'Ada2');
     await join(p, host, { name: 'Ada2' });

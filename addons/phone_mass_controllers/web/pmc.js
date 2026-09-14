@@ -269,6 +269,72 @@ export function vibrate(pattern) {
   try { return !!navigator.vibrate?.(pattern); } catch { return false; }
 }
 
+// --- feedback() ---------------------------------------------------------------
+// iOS has no vibration API, so feedback() falls back to a 60 ms screen flash plus a short
+// WebAudio click. The click only works after a user gesture (we unlock audio on pointerdown).
+
+const FEEDBACK_KINDS = {
+  buzz: { vib: 25, color: '255 255 255', freq: 220, dur: 0.05 },
+  success: { vib: [80, 40, 160], color: '46 194 126', freq: 660, dur: 0.09 },
+  error: { vib: 300, color: '255 90 95', freq: 110, dur: 0.18 },
+};
+
+let _flashEl = null;
+let _audio = null, _audioHooked = false;
+
+/**
+ * Tactile-ish feedback: 'buzz' | 'success' | 'error'. Vibrates where the device supports it,
+ * otherwise flashes the screen and (once a gesture has unlocked audio) plays a click.
+ * @returns {'vibrate'|'flash'|false} which channel fired.
+ */
+export function feedback(kind = 'buzz') {
+  const f = FEEDBACK_KINDS[kind] ?? FEEDBACK_KINDS.buzz;
+  if (vibrate(f.vib)) return 'vibrate';
+  _flash(f.color);
+  _click(f.freq, f.dur);
+  return _flashEl ? 'flash' : false;
+}
+
+function _flash(rgb) {
+  const doc = globalThis.document;
+  if (!doc?.body) return;
+  if (!_flashEl) {
+    _flashEl = doc.createElement('div');
+    _flashEl.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;opacity:0;transition:opacity .25s';
+    doc.body.append(_flashEl);
+  }
+  _flashEl.style.background = `rgb(${rgb} / .3)`;
+  _flashEl.style.opacity = '1';
+  clearTimeout(_flashEl._t);
+  _flashEl._t = setTimeout(() => { _flashEl.style.opacity = '0'; }, 60);
+}
+
+function _click(freq, dur) {
+  const doc = globalThis.document;
+  if (!doc) return;
+  if (!_audioHooked) {
+    _audioHooked = true;
+    // Audio on iOS only starts inside a user gesture; resume on every tap (it re-suspends).
+    doc.addEventListener('pointerdown', () => {
+      try {
+        _audio ??= new (globalThis.AudioContext ?? globalThis.webkitAudioContext)();
+        _audio.resume?.();
+      } catch {}
+    }, { capture: true });
+  }
+  if (!_audio || _audio.state !== 'running') return;
+  try {
+    const o = _audio.createOscillator(), g = _audio.createGain();
+    o.type = 'square';
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(0.08, _audio.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, _audio.currentTime + dur);
+    o.connect(g).connect(_audio.destination);
+    o.start();
+    o.stop(_audio.currentTime + dur);
+  } catch {}
+}
+
 let wakeHooked = false;
 
 /**

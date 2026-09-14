@@ -88,5 +88,14 @@ export declare function connect(opts?: PMCOptions): PMCClient;
 /** Feature-detected `navigator.vibrate`. Returns false where unsupported (e.g. iOS Safari). */
 export declare function vibrate(pattern: number | number[]): boolean;
 
+/** Feedback kind for `feedback()`. */
+export type PMCFeedbackKind = 'buzz' | 'success' | 'error' | (string & {});
+
+/**
+ * Tactile-ish feedback: vibrates where supported, else a 60 ms screen flash plus a short
+ * WebAudio click (audio only after a user gesture). Returns which channel fired.
+ */
+export declare function feedback(kind?: PMCFeedbackKind): 'vibrate' | 'flash' | false;
+
 /** Request a screen wake lock (secure contexts only). Resolves false silently when unavailable. */
 export declare function wakeLock(): Promise<boolean>;

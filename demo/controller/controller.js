@@ -8,7 +8,7 @@
 //   phone -> host  {type:"buzz", at}     (at = pmc.timestamp(): host-clock tap time, RTT-bounded)
 //                  {type:"admin", action:"start"|"next"|"reset"|"kick", id?}
 //   binary         any bytes are echoed back to the sender
-import { connect, vibrate, wakeLock } from '/pmc/pmc.js';
+import { connect, feedback, wakeLock } from '/pmc/pmc.js';
 
 const COLORS = ['#ff5a5f', '#ff8c42', '#ffc53d', '#2ec27e', '#26c6da', '#3d8bfd', '#a371f7', '#ff6fb5'];
 const EMOJIS = ['🦊', '🐸', '🐙', '🦉', '🐼', '🦄', '🐝', '🐢', '🌵', '🍉', '🚀', '👾', '🎸', '🍩', '⚡', '🌈'];
@@ -135,7 +135,7 @@ function onMessage(d) {
       $('secret-shape').innerHTML = shapeSvg(d.symbol.shape, d.symbol.color);
       $('secret-label').textContent = d.symbol.label;
       $('secret-label').style.color = d.symbol.color;
-      vibrate([40, 60, 40]);
+      feedback('buzz');
       break;
     case 'buzz':
       onBuzzResult(d);
@@ -150,10 +150,10 @@ function clearSecretIfOld() {
 function onBuzzResult({ result, locked_ms }) {
   const fb = $('feedback');
   fb.className = 'feedback ' + result;
-  if (result === 'win') { fb.textContent = 'Got it! +1'; $('buzzer').classList.add('won'); vibrate([80, 40, 160]); }
+  if (result === 'win') { fb.textContent = 'Got it! +1'; $('buzzer').classList.add('won'); feedback('success'); }
   else if (result === 'wrong' || result === 'locked') {
     fb.textContent = 'Not your symbol! Wait…';
-    vibrate(300);
+    feedback('error');
     clearTimeout(lockTimer);
     $('buzzer').classList.add('locked');
     lockTimer = setTimeout(() => { $('buzzer').classList.remove('locked'); fb.textContent = ' '; }, locked_ms);
@@ -210,7 +210,7 @@ $('buzzer').addEventListener('pointerdown', (ev) => {
   // Stamp the tap on the host clock: the host credits it bounded by our RTT, so a
   // remote player isn't beaten by a local one just because the tunnel is slower.
   pmc.send({ type: 'buzz', at: pmc.timestamp() });
-  vibrate(25);
+  feedback('buzz');
 });
 
 $('pin-form').onsubmit = async (ev) => {

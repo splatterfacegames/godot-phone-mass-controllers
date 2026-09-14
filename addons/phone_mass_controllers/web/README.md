@@ -5,7 +5,7 @@
 
 ```html
 <script type="module">
-  import { connect, vibrate, wakeLock } from '/pmc/pmc.js';
+  import { connect, feedback, wakeLock } from '/pmc/pmc.js';
 
   const pmc = connect({ name: 'Sam', profile: { color: '#3d8bfd' } });
   pmc.on('welcome', ({ id, rejoined }) => console.log('I am player', id, rejoined ? '(rejoined)' : ''));
@@ -14,7 +14,7 @@
   pmc.on('status', (s) => { /* 'connecting' | 'open' | 'reconnecting' | 'closed' */ });
   pmc.on('moved', ({ url }) => { /* join URL changed (ephemeral tunnel): ask for a re-scan */ });
 
-  button.onpointerdown = () => { pmc.send({ type: 'buzz', at: pmc.timestamp() }); vibrate(25); };
+  button.onpointerdown = () => { pmc.send({ type: 'buzz', at: pmc.timestamp() }); feedback('buzz'); };
 </script>
 ```
 
@@ -39,6 +39,7 @@
 | `pmc.rttMs` | Rolling average round-trip time in ms from ping/pong (0 until the first pong). |
 | `pmc.id`, `pmc.admin`, `pmc.status`, `pmc.name`, `pmc.profile`, `pmc.joinUrl`, `pmc.token` | Current state. |
 | `vibrate(pattern)` → bool | Feature-detected `navigator.vibrate` (absent on iOS). |
+| `feedback(kind)` → `'vibrate'`/`'flash'`/`false` | `kind` is `'buzz'`/`'success'`/`'error'`. Vibrates where supported; otherwise a 60 ms screen flash plus a short WebAudio click (audio only after a user gesture). |
 | `wakeLock()` → `Promise<boolean>` | Screen wake lock. It needs a secure context (https or localhost), and it's re-acquired when the page becomes visible again. |
 
 ## Behaviour
@@ -60,7 +61,8 @@
 
 ## Platform notes
 
-- iOS Safari has no `navigator.vibrate`, so `vibrate()` returns `false` there.
+- iOS Safari (and every iOS browser — they're all WebKit) has no `navigator.vibrate`, so `vibrate()` returns
+  `false` there. Use `feedback()` for a visual/audio fallback.
 - Wake lock needs a secure context. On a plain `http://192.168.x.x` LAN page it's unavailable. Over the https tunnel it works.
 - Backgrounded tabs and locked screens freeze or kill WebSockets, especially on iOS. The client recovers when the page
   comes back, and the host keeps the player for `grace_seconds`.
