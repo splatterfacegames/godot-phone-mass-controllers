@@ -43,7 +43,8 @@ signal message_received(player: PMCPlayer, data)
 ## The join URL changed (start, port, [member advertise_url], [member join_code], tunnel).
 signal join_url_changed(url: String)
 ## Tunnel progress: [code]"downloading"[/code], [code]"starting"[/code], [code]"ready"[/code] (url = public URL),
-## [code]"failed"[/code] (url = reason) or [code]"stopped"[/code].
+## [code]"lost"[/code] (url = reason — it was up and dropped), [code]"failed"[/code] (url = reason) or
+## [code]"stopped"[/code].
 signal tunnel_state_changed(state: String, url: String)
 
 ## Preferred TCP port. [code]0[/code] picks a free ephemeral port.
@@ -112,9 +113,33 @@ signal tunnel_state_changed(state: String, url: String)
 
 @export_group("Tunnel")
 ## Let [method start_tunnel] download cloudflared if it isn't found.
-@export var tunnel_allow_download := false
+@export var tunnel_allow_download := true
 ## Explicit cloudflared executable path (optional).
 @export var cloudflared_path := ""
+## [code]"quick"[/code] (account-less, random trycloudflare URL) or [code]"named"[/code] (your Cloudflare
+## account, stable hostname — set [member named_tunnel_token] and [member named_tunnel_hostname]).
+@export var tunnel_mode := "quick"
+## Named mode: token from the Cloudflare dashboard's "run with token" flow.
+@export var named_tunnel_token := ""
+## Named mode: the public hostname routed to the tunnel (e.g. [code]party.example.com[/code]). The join
+## URL is built from it, since token mode prints no trycloudflare URL.
+@export var named_tunnel_hostname := ""
+## Wait for the public hostname to resolve (DNS-over-HTTPS) before the tunnel reports ready. A QR scanned
+## before the name resolves can stick a phone on a cached "no such host" answer for ~90 s.
+@export var tunnel_verify_dns := true
+## Seconds to wait for the tunnel to become ready before failing.
+@export var tunnel_ready_timeout_sec := 60.0
+## Extra cloudflared arguments (e.g. [code]["--protocol", "http2"][/code] to force TCP on networks that
+## block QUIC/UDP 7844).
+@export var tunnel_extra_args: PackedStringArray = PackedStringArray()
+## Join code used while a tunnel is up ([method start_tunnel]'s [code]code[/code] parameter wins).
+## Non-empty is used as-is and is never auto-cleared on [method stop_tunnel].
+@export var tunnel_join_code := ""
+## Automatically restart a tunnel that dropped after being ready (a new random URL is issued; connected
+## phones can't be told and must rescan). Bounded — see [constant _MAX_AUTO_RESTARTS].
+@export var tunnel_auto_restart := true
+## Delay before an automatic tunnel restart.
+@export var tunnel_restart_delay_sec := 2.0
 
 const _TIMER_MSEC := 50
 const _STATUS_EVERY_FRAMES := 15
@@ -127,6 +152,7 @@ const _AUTH_LOCK_MSEC := 30000
 const _AUTH_ADDR_MAX_FAILURES := 20
 const _AUTH_ADDR_LOCK_MSEC := 60000
 const _CODE_ALPHABET := "ABCDEFGHJKLMNPQRSTUVWXYZ"
+const _MAX_AUTO_RESTARTS := 3
 
 var _server: TCPServer = null
 var _running := false
@@ -157,9 +183,13 @@ var _lan_cache_msec := -100000
 var _class_cache: Dictionary = {}
 var _suppress_url_signal := false
 var _tunnel: Object = null
+var _tunnel_pending: Object = null      # replacement tunnel coming up (rolling restart)
+var _pending_tunnel_code := ""          # game-supplied code for the next "ready"
 var _tunnel_prev_advertise := ""
 var _tunnel_set_advertise := false
 var _tunnel_generated_code := false
+var _auto_restarts := 0
+var _tunnel_epoch := 0
 var _stats := {
 	"http_requests": 0, "ws_messages_in": 0, "ws_messages_out": 0, "bytes_in": 0, "bytes_out": 0,
 	"last_poll_usec": 0, "max_poll_usec": 0, "accepted": 0, "refused": 0,
@@ -179,7 +209,7 @@ func _process(_delta: float) -> void:
 
 func _exit_tree() -> void:
 	if is_queued_for_deletion():
-		stop()
+		_shutdown(false)  # being freed: detach a live tunnel to the root so a scene reload can re-adopt it
 
 
 func _notification(what: int) -> void:
@@ -220,6 +250,11 @@ func start() -> Error:
 	_running = true
 	_last_sweep_msec = Time.get_ticks_msec()
 	set_process(auto_poll)
+	# A tunnel kept across stop()->start() points at the old port; retarget it when that changed.
+	# Doing it before the join_url_changed below keeps a stale tunnel URL out of the announcement.
+	if _tunnel != null and "_port" in _tunnel and int(_tunnel._port) != _port and _tunnel.has_method("start"):
+		_restore_after_tunnel(false)
+		_tunnel.start(_port)
 	started.emit(_port)
 	join_url_changed.emit(join_url())
 	return OK
@@ -233,7 +268,8 @@ static func _ipv4_port_free(p: int) -> bool:
 
 
 ## Stops the server, closes every socket (WebSocket close 1001) and forgets all players, tombstones and bans.
-## No player signals are emitted.
+## No player signals are emitted. A running tunnel is left up so [method start] on the same port reuses its
+## URL — call [method stop_tunnel] first to take it down too.
 func stop() -> void:
 	if not _running:
 		return
@@ -242,8 +278,12 @@ func stop() -> void:
 
 
 func _shutdown(graceful: bool) -> void:
+	_cancel_pending()
 	if _tunnel != null:
-		_stop_tunnel_internal(false)
+		if graceful:
+			pass  # keep the tunnel (and its URL/code) alive across stop()->start(); stop_tunnel() still ends it
+		else:
+			_detach_tunnel()
 	if not _running:
 		return
 	_running = false
@@ -1230,43 +1270,230 @@ static func _secure_equals(a: String, b: String) -> bool:
 # --------------------------------------------------------------------------------------------------
 # Tunnel
 
-## Starts a Cloudflare Quick Tunnel to this host (starting the host first if needed). Progress is reported via
-## [signal tunnel_state_changed]. When it's ready, [member advertise_url] becomes the tunnel URL and a 4-letter
-## [member join_code] is generated if none is set.
-func start_tunnel() -> void:
+## Shares this host outside the LAN through a Cloudflare tunnel (starting the host first if needed).
+## Progress is reported via [signal tunnel_state_changed]. When it's ready, [member advertise_url]
+## becomes the tunnel URL and a 4-letter [member join_code] is generated if none is set — unless
+## [param code] (or [member tunnel_join_code]) supplies one, which is then used as-is and never
+## auto-cleared.
+## [br][br]
+## Calling it while a healthy tunnel already points at the current port is a no-op (the URL is
+## re-announced) — a tunnel kept across [method stop]/[method start] or re-adopted after a scene
+## reload is reused, not replaced. Call [method restart_tunnel] to force a fresh URL.
+func start_tunnel(code := "") -> void:
+	_tunnel_epoch += 1
+	_auto_restarts = 0
 	if _tunnel != null:
+		var st := String(_tunnel.state) if "state" in _tunnel else ""
+		if st == "starting" or st == "downloading":
+			return
+		if st == "ready" or st == "lost":
+			var same_port := "_port" in _tunnel and int(_tunnel._port) == _port and _running
+			if st == "ready" and same_port:
+				_apply_tunnel_ready(String(_tunnel.url) if "url" in _tunnel else "")
+				return
+			# Lost, or retargeting a kept tunnel to a new port: bring a replacement up first.
+			if _rolling_restart(code):
+				return
+		_stop_tunnel_internal(true)  # failed/stopped leftover, or rolling restart unavailable
+	if not _running:
+		var err := start()
+		if err != OK:
+			tunnel_state_changed.emit("failed", "host failed to start: %s" % error_string(err))
+			return
+	_pending_tunnel_code = code if code != "" else tunnel_join_code
+	if _adopt_detached():
+		return
+	var t := _make_tunnel()
+	if t == null:
+		tunnel_state_changed.emit("failed", "PMCTunnel class not found")
+		return
+	_tunnel = t
+	t.state_changed.connect(_on_tunnel_state)
+	t.start(_port)
+
+
+## Brings up a fresh tunnel while the old one keeps serving: connected players get a
+## [code]pmc.moved[/code] notice with the new join URL before the old tunnel goes down. When no
+## live tunnel exists this is the same as [method start_tunnel].
+func restart_tunnel(code := "") -> void:
+	_tunnel_epoch += 1
+	_auto_restarts = 0
+	if _tunnel == null:
+		start_tunnel(code)
+		return
+	var st := String(_tunnel.state) if "state" in _tunnel else ""
+	if st != "ready" and st != "lost":
+		start_tunnel(code)
 		return
 	if not _running:
 		var err := start()
 		if err != OK:
 			tunnel_state_changed.emit("failed", "host failed to start: %s" % error_string(err))
 			return
-	var cls = _global_class("PMCTunnel")
-	if cls == null:
+	if not _rolling_restart(code):
 		tunnel_state_changed.emit("failed", "PMCTunnel class not found")
-		return
-	var t: Object = cls.new()
-	if "allow_download" in t:
-		t.allow_download = tunnel_allow_download
-	if cloudflared_path != "" and "cloudflared_path" in t:
-		t.cloudflared_path = cloudflared_path
-	_tunnel = t
-	if t is Node:
-		t.name = "PMCTunnel"
-		add_child(t)
-	t.state_changed.connect(_on_tunnel_state)
-	t.start(_port)
 
 
 ## Stops the tunnel and restores the previous join URL (and clears an auto-generated join code).
 func stop_tunnel() -> void:
+	_tunnel_epoch += 1
+	_auto_restarts = 0
+	_cancel_pending()
 	if _tunnel != null:
 		_stop_tunnel_internal(true)
 
 
-## The active tunnel object ([code]PMCTunnel[/code]), or [code]null[/code].
+## The active tunnel object ([code]PMCTunnel[/code]), or [code]null[/code]. You can still mutate it
+## right after [method start_tunnel], but the [code]tunnel_*[/code] exports are the supported way.
 func get_tunnel() -> Object:
 	return _tunnel
+
+
+## Builds a PMCTunnel child with the [code]tunnel_*[/code] exports applied, or null when unavailable.
+func _make_tunnel() -> Object:
+	var cls = _global_class("PMCTunnel")
+	if cls == null:
+		return null
+	var t: Object = cls.new()
+	if "allow_download" in t:
+		t.allow_download = tunnel_allow_download
+	if "cloudflared_path" in t:
+		t.cloudflared_path = cloudflared_path
+	if "verify_dns" in t:
+		t.verify_dns = tunnel_verify_dns
+	if "ready_timeout_sec" in t:
+		t.ready_timeout_sec = tunnel_ready_timeout_sec
+	if "extra_args" in t:
+		t.extra_args = tunnel_extra_args
+	if "mode" in t:
+		t.mode = tunnel_mode
+	if "named_token" in t:
+		t.named_token = named_tunnel_token
+	if "named_hostname" in t:
+		t.named_hostname = named_tunnel_hostname
+	if t is Node:
+		t.name = "PMCTunnel"
+		add_child(t)
+	return t
+
+
+## Brings up a replacement tunnel alongside the running one; [method _on_tunnel_pending_state] swaps
+## them once it's ready. Returns false when PMCTunnel is unavailable.
+func _rolling_restart(code: String) -> bool:
+	if _tunnel_pending != null:
+		return true
+	_pending_tunnel_code = code if code != "" else tunnel_join_code
+	var t := _make_tunnel()
+	if t == null:
+		return false
+	t.name = "PMCTunnelPending"
+	_tunnel_pending = t
+	t.state_changed.connect(_on_tunnel_pending_state)
+	t.start(_port)
+	return true
+
+
+func _cancel_pending() -> void:
+	var t := _tunnel_pending
+	_tunnel_pending = null
+	if t == null:
+		return
+	if t.state_changed.is_connected(_on_tunnel_pending_state):
+		t.state_changed.disconnect(_on_tunnel_pending_state)
+	if t.has_method("stop"):
+		t.stop()
+	if t is Node:
+		t.queue_free()
+
+
+func _on_tunnel_pending_state(state: String, detail: String) -> void:
+	var t := _tunnel_pending
+	if t == null:
+		return
+	match state:
+		"ready":
+			_tunnel_pending = null
+			t.state_changed.disconnect(_on_tunnel_pending_state)
+			t.state_changed.connect(_on_tunnel_state)
+			var old := _tunnel
+			_tunnel = t
+			# Sends pmc.moved with the new URL before the old tunnel goes down.
+			_apply_tunnel_ready(detail)
+			if old != null:
+				if old.state_changed.is_connected(_on_tunnel_state):
+					old.state_changed.disconnect(_on_tunnel_state)
+				if old.has_method("stop"):
+					old.stop()
+				if old is Node:
+					old.queue_free()
+		"failed":
+			_cancel_pending()
+			# The old tunnel is still up; report the failed restart but keep it.
+			tunnel_state_changed.emit("failed", detail)
+		"stopped":
+			_cancel_pending()
+		_:
+			tunnel_state_changed.emit(state, detail)
+
+
+## A ready tunnel survives this host node: it detaches to the scene root so a scene reload can keep the
+## URL. PMCHost re-adopts it on the next [method start_tunnel] with the same port.
+func _detach_tunnel() -> void:
+	var t := _tunnel
+	_tunnel = null
+	if t == null or not is_instance_valid(t):
+		return
+	if t.state_changed.is_connected(_on_tunnel_state):
+		t.state_changed.disconnect(_on_tunnel_state)
+	var st := String(t.state) if "state" in t else ""
+	var live: bool = st == "ready" or st == "starting" or st == "lost" or (t.has_method("is_running") and t.is_running())
+	# The tunnel child has already left the tree by the time the host's _exit_tree/PREDELETE runs.
+	if not t is Node or not live or not is_inside_tree():
+		if t != null and t.has_method("stop"):
+			t.stop()
+		return
+	var root := get_tree().root
+	if "detached" in t:
+		t.detached = true
+	var parent: Node = (t as Node).get_parent()
+	if parent != null:
+		parent.remove_child(t)
+	root.add_child(t)
+	if not (t as Node).is_inside_tree():
+		t.free()  # reparent failed (tree is dying) — free() runs PREDELETE, which kills the process
+
+
+## Re-adopts a tunnel detached by a freed host. Returns true when the running tunnel was reused.
+func _adopt_detached() -> bool:
+	if not is_inside_tree():
+		return false
+	var cls = _global_class("PMCTunnel")
+	for c in get_tree().root.get_children():
+		if not ("detached" in c and c.detached):
+			continue
+		if cls != null and c.get_script() != cls:
+			continue
+		var alive: bool = c.has_method("is_running") and c.is_running()
+		var starting: bool = "state" in c and String(c.state) == "starting"
+		var port_ok: bool = "_port" in c and int(c._port) == _port
+		if port_ok and (alive or starting):
+			get_tree().root.remove_child(c)
+			add_child(c)
+			c.name = "PMCTunnel"
+			c.detached = false
+			_tunnel = c
+			c.state_changed.connect(_on_tunnel_state)
+			if "state" in c and String(c.state) == "ready":
+				_apply_tunnel_ready(String(c.url) if "url" in c else "")
+			else:
+				tunnel_state_changed.emit(String(c.state), "")
+			return true
+		# Wrong port or dead process: dispose of the orphan.
+		c.detached = false
+		if c.has_method("stop"):
+			c.stop()
+		c.queue_free()
+	return false
 
 
 func _stop_tunnel_internal(emit: bool) -> void:
@@ -1282,22 +1509,66 @@ func _stop_tunnel_internal(emit: bool) -> void:
 		tunnel_state_changed.emit("stopped", "")
 
 
+## The "ready" path: advertise the tunnel URL, pick a join code and notify. When a previous tunnel URL is
+## replaced, connected players get [code]pmc.moved[/code] with the new join URL.
+func _apply_tunnel_ready(detail: String) -> void:
+	var url: String = String(_tunnel.url) if _tunnel != null and "url" in _tunnel else detail
+	if url == "":
+		return
+	var had_tunnel := _tunnel_set_advertise
+	var prev_join := join_url() if had_tunnel else ""
+	_suppress_url_signal = true
+	if not _tunnel_set_advertise:
+		_tunnel_prev_advertise = advertise_url
+		_tunnel_set_advertise = true
+	advertise_url = url
+	if _pending_tunnel_code != "":
+		join_code = _pending_tunnel_code
+		_pending_tunnel_code = ""
+		_tunnel_generated_code = false
+	elif join_code == "":
+		join_code = _generate_code()
+		_tunnel_generated_code = true
+	_suppress_url_signal = false
+	var new_join := join_url()
+	tunnel_state_changed.emit("ready", url)
+	if _running:
+		join_url_changed.emit(new_join)
+	if had_tunnel and new_join != prev_join:
+		_broadcast_moved(new_join)
+
+
+## Tells every connected player the join URL changed (they were issued tokens on the old tunnel URL).
+func _broadcast_moved(url: String) -> void:
+	var frame := PMCWsFrame.text(JSON.stringify({"t": "pmc.moved", "d": {"url": url}}, "", false))
+	for p: PMCPlayer in _players.values():
+		var c: PMCConnection = p._conn
+		if c != null and not c.close_sent and c.is_open():
+			c.queue(frame)
+			_msgs_out += 1
+
+
 func _on_tunnel_state(state: String, detail: String) -> void:
 	match state:
 		"ready":
-			var url: String = _tunnel.url if _tunnel != null and "url" in _tunnel else detail
-			_suppress_url_signal = true
-			if not _tunnel_set_advertise:
-				_tunnel_prev_advertise = advertise_url
-				_tunnel_set_advertise = true
-			advertise_url = url
-			if join_code == "":
-				join_code = _generate_code()
-				_tunnel_generated_code = true
-			_suppress_url_signal = false
-			tunnel_state_changed.emit("ready", url)
-			if _running:
-				join_url_changed.emit(join_url())
+			_auto_restarts = 0
+			_apply_tunnel_ready(detail)
+		"lost":
+			var alive: bool = _tunnel != null and _tunnel.has_method("is_running") and _tunnel.is_running()
+			if alive:
+				# The process lives and may re-register; keep the tunnel URL advertised.
+				tunnel_state_changed.emit("lost", detail)
+				return
+			if _tunnel != null:
+				var t := _tunnel
+				_tunnel = null
+				if t.state_changed.is_connected(_on_tunnel_state):
+					t.state_changed.disconnect(_on_tunnel_state)
+				if t is Node:
+					t.queue_free.call_deferred()
+			_restore_after_tunnel(true)
+			tunnel_state_changed.emit("lost", detail)
+			_maybe_auto_restart()
 		"failed", "stopped":
 			if _tunnel != null:
 				var t := _tunnel
@@ -1310,6 +1581,20 @@ func _on_tunnel_state(state: String, detail: String) -> void:
 			tunnel_state_changed.emit(state, detail)
 		_:
 			tunnel_state_changed.emit(state, detail)
+
+
+## Restarts a tunnel that dropped after being ready. Bounded to [constant _MAX_AUTO_RESTARTS] per
+## [method start_tunnel]; a "failed" tunnel never auto-restarts.
+func _maybe_auto_restart() -> void:
+	if not tunnel_auto_restart or not _running or _auto_restarts >= _MAX_AUTO_RESTARTS or not is_inside_tree():
+		return
+	_auto_restarts += 1
+	var epoch := _tunnel_epoch
+	var count := _auto_restarts  # start_tunnel() resets the counter; restore it so the bound holds
+	get_tree().create_timer(maxf(tunnel_restart_delay_sec, 0.0)).timeout.connect(func() -> void:
+		if _tunnel_epoch == epoch and _tunnel == null and _tunnel_pending == null and _running:
+			start_tunnel()
+			_auto_restarts = count)
 
 
 func _restore_after_tunnel(emit: bool) -> void:
