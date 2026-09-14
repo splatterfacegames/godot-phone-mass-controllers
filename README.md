@@ -1,6 +1,6 @@
 # godot-phone-mass-controllers
 
-**Site: [pmc.jethachan.net](https://pmc.jethachan.net)** · MIT · Godot 4.3+ (tested 4.7.1) · pure GDScript, zero dependencies
+**Site: [pmc.splatterfacegames.com](https://pmc.splatterfacegames.com)** · MIT · Godot 4.3+ (tested 4.7.1) · pure GDScript, zero dependencies
 
 Turn a Godot 4 game into the host for a room full of phone controllers. Players scan a QR code,
 their phone's browser loads a controller page **served by the game itself**, and they're in. There's no app

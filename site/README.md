@@ -6,7 +6,7 @@ The project website for godot-phone-mass-controllers — a static, dependency-fr
 
 Deployed automatically by [.github/workflows/pages.yml](../.github/workflows/pages.yml) to
 GitHub Pages on every push to `main` that touches `site/`. Served at the custom domain
-**pmc.jethachan.net** (see `CNAME`; DNS via Cloudflare → GitHub Pages).
+**pmc.splatterfacegames.com** (see `CNAME`; DNS via Cloudflare → GitHub Pages).
 
 - `index.html` — the page
 - `style.css` — the only stylesheet

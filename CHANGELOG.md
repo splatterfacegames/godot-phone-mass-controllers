@@ -71,7 +71,7 @@ Every open issue on the tracker is addressed in this release. Highlights:
 
 ### Project site
 
-- [pmc.jethachan.net](https://pmc.jethachan.net) — explainer, quickstart, caveats, deployed
+- [pmc.splatterfacegames.com](https://pmc.splatterfacegames.com) — explainer, quickstart, caveats, deployed
   from `site/` by `.github/workflows/pages.yml`.
 
 ## 0.1.0 — 2026-09-13
