@@ -132,6 +132,7 @@ signal player_updated(player: PMCPlayer)             # name/profile changed
 signal admin_authenticated(player: PMCPlayer)
 signal message_received(player: PMCPlayer, data)     # Variant from JSON `d`, or PackedByteArray
 signal join_url_changed(url: String)
+signal no_joins_hint                                 # no joins within no_joins_hint_seconds of the URL going up (0 = off)
 
 func start() -> Error
 func stop() -> void

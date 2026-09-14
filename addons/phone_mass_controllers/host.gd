@@ -45,6 +45,10 @@ signal join_url_changed(url: String)
 ## Tunnel progress: [code]"downloading"[/code], [code]"starting"[/code], [code]"ready"[/code] (url = public URL),
 ## [code]"failed"[/code] (url = reason) or [code]"stopped"[/code].
 signal tunnel_state_changed(state: String, url: String)
+## Emitted once when no phone has joined within [member no_joins_hint_seconds] of the join URL being shown.
+## Guest Wi-Fi often isolates clients (the QR opens but the page never loads) — use this to suggest the
+## tunnel or a hotspot. Off by default.
+signal no_joins_hint
 
 ## Preferred TCP port. [code]0[/code] picks a free ephemeral port.
 @export var port := 8080
@@ -82,6 +86,9 @@ signal tunnel_state_changed(state: String, url: String)
 @export var max_message_bytes := 1 << 20
 ## Call [method start] in [method Node._ready].
 @export var autostart := false
+## When > 0, [signal no_joins_hint] fires once if no player has joined this many seconds after the join
+## URL went up (start, or a later URL change such as the tunnel coming up). 0 disables it.
+@export var no_joins_hint_seconds := 0.0
 
 @export_group("Limits")
 ## Poll sockets automatically from [method Node._process]. Turn it off to call [method poll] yourself.
@@ -174,6 +181,10 @@ var _tunnel_set_advertise := false
 var _tunnel_generated_code := false
 var _auth_fail_total := 0
 var _auth_disabled := false
+var _join_count := 0           # hellos that produced a welcome (join, rejoin, replace)
+var _hint_deadline_msec := 0  # armed deadline for no_joins_hint (0 = disarmed)
+var _hint_joins_at_arm := 0
+var _hint_fired := false
 var _stats := {
 	"http_requests": 0, "ws_messages_in": 0, "ws_messages_out": 0, "bytes_in": 0, "bytes_out": 0,
 	"last_poll_usec": 0, "max_poll_usec": 0, "accepted": 0, "refused": 0,
@@ -233,6 +244,7 @@ func start() -> Error:
 	_port = _server.get_local_port()
 	_running = true
 	_last_sweep_msec = Time.get_ticks_msec()
+	_arm_hint()
 	set_process(auto_poll)
 	started.emit(_port)
 	join_url_changed.emit(join_url())
@@ -278,6 +290,7 @@ func _shutdown(graceful: bool) -> void:
 	_addr_failures.clear()
 	_auth_fail_total = 0
 	_auth_disabled = false
+	_hint_deadline_msec = 0
 	if _server != null:
 		_server.stop()
 		_server = null
@@ -959,6 +972,11 @@ func _timers(now: int) -> void:
 				c.ping_sent_msec = now
 				c.next_ping_msec = now + _heartbeat_msec()
 
+	if _hint_deadline_msec > 0 and not _hint_fired and now >= _hint_deadline_msec:
+		_hint_fired = true
+		if _join_count == _hint_joins_at_arm:
+			no_joins_hint.emit()
+
 	if now - _last_sweep_msec >= 100:
 		_last_sweep_msec = now
 		for p: PMCPlayer in _players.values():
@@ -1134,6 +1152,7 @@ func _on_hello(c: PMCConnection, m: Dictionary, now: int) -> void:
 		_attach(c, existing, now)
 		var changed := _apply_identity(existing, m)
 		_welcome(c, existing, true)
+		_join_count += 1
 		player_rejoined.emit(existing)
 		if changed and existing._conn == c:
 			player_updated.emit(existing)
@@ -1179,6 +1198,7 @@ func _on_hello(c: PMCConnection, m: Dictionary, now: int) -> void:
 	_by_token[p.token] = p
 	_attach(c, p, now)
 	_welcome(c, p, rejoined)
+	_join_count += 1
 	player_joined.emit(p)
 
 
@@ -1379,6 +1399,7 @@ func _on_tunnel_state(state: String, detail: String) -> void:
 			_suppress_url_signal = false
 			tunnel_state_changed.emit("ready", url)
 			if _running:
+				_arm_hint()
 				join_url_changed.emit(join_url())
 		"failed", "stopped":
 			if _tunnel != null:
@@ -1420,7 +1441,16 @@ func _generate_code(length := 4) -> String:
 
 func _url_changed() -> void:
 	if _running and not _suppress_url_signal:
+		_arm_hint()
 		join_url_changed.emit(join_url())
+
+
+func _arm_hint() -> void:
+	if no_joins_hint_seconds <= 0.0:
+		return
+	_hint_deadline_msec = Time.get_ticks_msec() + int(no_joins_hint_seconds * 1000.0)
+	_hint_joins_at_arm = _join_count
+	_hint_fired = false
 
 
 # Resolves a global class_name lazily, so optional parts (QR, tunnel) may be absent.
