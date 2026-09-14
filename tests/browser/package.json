@@ -1,0 +1,12 @@
+{
+  "name": "pmc-browser-tests",
+  "private": true,
+  "type": "module",
+  "description": "Playwright (Chromium) tests: pmc.js SDK + Buzzer Party demo against the headless Godot host",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"*.test.mjs\""
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

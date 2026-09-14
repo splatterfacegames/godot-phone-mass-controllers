@@ -1,0 +1,5 @@
+.godot/
+*.tmp
+node_modules/
+tests/**/out/
+/export/

@@ -1,0 +1,10 @@
+; Godot 4 project for developing/testing the addon and running the demo.
+; Consumers copy addons/phone_mass_controllers/ into their own project.
+config_version=5
+
+[application]
+config/name="godot-phone-mass-controllers"
+run/main_scene="res://demo/main.tscn"
+
+[editor_plugins]
+enabled=PackedStringArray("res://addons/phone_mass_controllers/plugin.cfg")

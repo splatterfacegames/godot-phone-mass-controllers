@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Godot 4.7.1
+        run: |
+          curl -L --fail --output godot.zip \
+            https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip
+          unzip -q godot.zip
+          chmod +x Godot_v4.7.1-stable_linux.x86_64
+          sudo mv Godot_v4.7.1-stable_linux.x86_64 /usr/local/bin/godot
+      - name: Import project
+        run: godot --headless --import || true
+      - name: GDScript suites
+        run: timeout 600 godot --headless --script tests/run_tests.gd
+      - name: Node interop + QR decode
+        run: |
+          cd tests/node
+          npm ci || npm i
+          npm test
+        env:
+          GODOT: godot
+      - name: Browser tests (Chromium)
+        run: |
+          cd tests/browser
+          npm ci || npm i
+          npx playwright install --with-deps chromium
+          npm test
+        env:
+          GODOT: godot
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-screenshots
+          path: tests/browser/out/
