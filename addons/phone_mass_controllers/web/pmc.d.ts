@@ -25,6 +25,7 @@ export interface PMCWelcome {
   profile: Record<string, unknown>;
   rejoined: boolean;
   admin: boolean;
+  /** Host clock, Unix epoch ms. */
   server_ms: number;
   join_url: string;
 }
@@ -40,6 +41,8 @@ export interface PMCEventMap {
   replaced: undefined;
   /** Result of any `pmc.auth` reply. */
   auth: boolean;
+  /** The join URL changed (ephemeral tunnel). The page may auto-follow https→https; otherwise show "re-scan the QR". */
+  moved: { url: string };
 }
 
 export declare class PMCClient {
@@ -72,8 +75,12 @@ export declare class PMCClient {
   leave(): void;
   /** Resume connecting after the client stopped (reject, kick, replaced, leave). */
   reconnect(): void;
-  /** Host clock (ms), corrected by the median of the last 5 ping offset samples. */
+  /** Host clock (Unix epoch ms), corrected by the median of the last 5 ping offset samples. */
   serverNow(): number;
+  /** Host-clock timestamp for stamping inputs (same clock as serverNow). */
+  timestamp(): number;
+  /** Rolling average round-trip time in ms from ping/pong (0 until the first pong). */
+  readonly rttMs: number;
 }
 
 export declare function connect(opts?: PMCOptions): PMCClient;

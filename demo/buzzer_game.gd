@@ -38,9 +38,12 @@ var flash_symbol := -1        # symbol index on screen, -1 = none
 var flash_seq := 0
 var rng := RandomNumberGenerator.new()
 
-var _prev_symbol := -1
-var _prev_changed_msec := 0
+const STEAL_MS := 400         # a late-arriving earlier tap can still take the win within this window
+
+var _flash_log := []          # [msec, symbol] per change this round; lets us judge a buzz at its own timestamp
 var _next_flash_msec := 0
+var _win_at_msec := 0
+var _win_seen_msec := -1      # -1 = nobody has won this round yet
 
 
 func _init(seed_value := 0) -> void:
@@ -70,7 +73,8 @@ func start_round(ids: Array, now_msec: int) -> bool:
 	locked_until.clear()
 	flash_symbol = -1
 	flash_seq = 0
-	_prev_symbol = -1
+	_win_seen_msec = -1
+	_flash_log = [[now_msec, -1]]
 	var bag := _shuffled_symbols()
 	for i in ids.size():
 		add_player(ids[i])
@@ -109,29 +113,47 @@ func tick(now_msec: int) -> Array:
 		flash_symbol = -1
 		events.append({"type": "timeout"})
 		return events
-	_prev_symbol = flash_symbol
-	_prev_changed_msec = now_msec
 	flash_symbol = _pick_flash()
 	flash_seq += 1
+	_flash_log.append([now_msec, flash_symbol])
 	_next_flash_msec = now_msec + flash_ms
 	events.append({"type": "flash", "symbol": flash_symbol, "seq": flash_seq})
 	return events
 
 
-## Handles a buzz. Returns {"result": Buzz, "locked_ms": int}.
-func buzz(id: int, now_msec: int) -> Dictionary:
+## Handles a buzz. [param at_msec] is when the phone says it tapped, on the host clock —
+## clamp it to [param seen_msec] - rtt at the edge so backdating stays bounded by latency.
+## A correct buzz tapped before the winner's but arriving within STEAL_MS of the win steals
+## the round (first tap wins, not first packet). A match-ending win is final.
+## Returns {"result": Buzz, "locked_ms": int}.
+func buzz(id: int, at_msec: int, seen_msec := -1) -> Dictionary:
+	if seen_msec < 0:
+		seen_msec = at_msec
+	if phase == "reveal" and _win_seen_msec >= 0:
+		if secrets.has(id) and at_msec < _win_at_msec and seen_msec - _win_seen_msec <= STEAL_MS \
+				and seen_msec >= locked_until.get(id, 0) and _hit(id, at_msec, seen_msec):
+			scores[winner_id] = int(scores[winner_id]) - 1
+			scores[id] = int(scores.get(id, 0)) + 1
+			winner_id = id
+			_win_at_msec = at_msec
+			_win_seen_msec = seen_msec
+			if scores[id] >= target_score:
+				phase = "over"
+				match_winner_id = id
+			return {"result": Buzz.WIN, "locked_ms": 0}
+		return {"result": Buzz.IDLE, "locked_ms": 0}
 	if phase != "round" or not secrets.has(id) or flash_symbol == -1:
 		return {"result": Buzz.IDLE, "locked_ms": 0}
 	var until: int = locked_until.get(id, 0)
-	if now_msec < until:
-		return {"result": Buzz.LOCKED, "locked_ms": until - now_msec}
-	var mine: int = secrets[id]
-	var hit := mine == flash_symbol or (mine == _prev_symbol and now_msec - _prev_changed_msec <= late_ms)
-	if not hit:
-		locked_until[id] = now_msec + lockout_ms
+	if seen_msec < until:
+		return {"result": Buzz.LOCKED, "locked_ms": until - seen_msec}
+	if not _hit(id, at_msec, seen_msec):
+		locked_until[id] = seen_msec + lockout_ms
 		return {"result": Buzz.WRONG, "locked_ms": lockout_ms}
 	scores[id] = int(scores.get(id, 0)) + 1
 	winner_id = id
+	_win_at_msec = at_msec
+	_win_seen_msec = seen_msec
 	flash_symbol = -1
 	if scores[id] >= target_score:
 		phase = "over"
@@ -139,6 +161,29 @@ func buzz(id: int, now_msec: int) -> Dictionary:
 	else:
 		phase = "reveal"
 	return {"result": Buzz.WIN, "locked_ms": 0}
+
+
+## Was [param id]'s secret on screen at [param at_msec] (with [member late_ms] grace for a tap
+## that lands right as the flash changes)? [param seen_msec] caps how far ahead a claim can reach.
+func _hit(id: int, at_msec: int, seen_msec: int) -> bool:
+	var mine: int = secrets.get(id, -1)
+	if mine < 0:
+		return false
+	# The live flash covers taps since it appeared (and a flash_symbol a host set directly).
+	if mine == flash_symbol and _flash_log.back()[0] <= at_msec and at_msec <= seen_msec:
+		return true
+	var i := _symbol_idx_at(at_msec)
+	if i >= 0 and _flash_log[i][1] == mine:
+		return true
+	return i > 0 and _flash_log[i - 1][1] == mine and at_msec - _flash_log[i][0] <= late_ms
+
+
+## Index into _flash_log of the symbol showing at [param at_msec]; -1 if before the round.
+func _symbol_idx_at(at_msec: int) -> int:
+	for i in range(_flash_log.size() - 1, -1, -1):
+		if _flash_log[i][0] <= at_msec:
+			return i
+	return -1
 
 
 ## Back to the lobby with all scores at zero (players stay).

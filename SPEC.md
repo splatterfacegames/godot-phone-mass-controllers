@@ -53,8 +53,8 @@ Client → host:
 
 | t | fields | notes |
 |---|--------|-------|
-| `pmc.hello` | `sdk:1`, `token?:string`, `name?:string`, `profile?:object`, `code?:string` | must be the first frame. `token` = rejoin |
-| `pmc.ping` | `c:number` (client ms) | |
+| `pmc.hello` | `sdk:1`, `token?:string`, `name?:string`, `profile?:object`, `code?:string` | must be the first frame. `token` = rejoin; `code` defaults from `?code=` in the page URL |
+| `pmc.ping` | `c:number` (client epoch ms) | |
 | `pmc.profile` | `name?`, `profile?` | update identity |
 | `pmc.auth` | `pin:string` | admin elevation |
 | `pmc.leave` | | explicit leave (no grace) |
@@ -64,12 +64,13 @@ Host → client:
 
 | t | fields | notes |
 |---|--------|-------|
-| `pmc.welcome` | `id:int`, `token:string`, `name`, `profile`, `rejoined:bool`, `admin:bool`, `server_ms:int`, `join_url:string` | |
+| `pmc.welcome` | `id:int`, `token:string`, `name`, `profile`, `rejoined:bool`, `admin:bool`, `server_ms:int`, `join_url:string` | `server_ms` is host clock in epoch ms |
 | `pmc.reject` | `code:string` (`bad_code`, `full`, `version`, `banned`, `bad_hello`), `reason:string` | then close 4000 |
-| `pmc.pong` | `c`, `s:int` (server ms) | clock-offset estimate |
+| `pmc.pong` | `c`, `s:int` (host epoch ms) | clock-offset + RTT estimate |
 | `pmc.auth` | `ok:bool` | 5 failures → 30 s lockout per connection |
 | `pmc.kicked` | `reason:string` | then close 4001 |
 | `pmc.replaced` | | same token connected elsewhere, then close 4002 |
+| `pmc.moved` | `url:string` | join URL changed (ephemeral tunnel). https→https pages may auto-follow; others should ask for a re-scan |
 | `msg` | `d:any` | game message |
 
 Identity: the token is a random 128-bit hex string issued by the host. The same token reconnecting within
@@ -156,18 +157,26 @@ func next_pair(policy, last_blue: int, last_red: int, winner: int, streaks: Dict
 
 ```js
 import { connect, vibrate, wakeLock } from '/pmc/pmc.js';
-const pmc = connect({ name, profile, code /* default: ?code= from location */ });
+const pmc = connect({ name, profile, code /* default: ?code= from location */, tokenKey });
 pmc.on('welcome', ({id, rejoined}) => {}); pmc.on('message', d => {}); pmc.on('binary', ab => {});
 pmc.on('status', s => {});            // 'connecting' | 'open' | 'reconnecting' | 'closed'
-pmc.on('reject', ({code, reason}) => {}); pmc.on('kicked', r => {});
+pmc.on('reject', ({code, reason}) => {}); pmc.on('kicked', r => {}); pmc.on('replaced', () => {});
+pmc.on('moved', ({url}) => {});       // join URL changed (ephemeral tunnel)
 pmc.send(obj); pmc.sendBinary(arrayBufferOrView); pmc.auth(pin) /* Promise<boolean> */;
 pmc.setProfile({name, profile}); pmc.leave();
-pmc.id; pmc.serverNow();              // ms, clock-offset corrected
+pmc.id; pmc.serverNow(); pmc.timestamp();  // host-clock ms, offset-corrected
+pmc.rttMs;                            // rolling avg round-trip ms
 ```
-- Token in localStorage, keyed by origin. Reconnect with jittered exponential backoff, capped at 5 s.
+- Token in localStorage, keyed by origin. Also mirrored to a `pmc_token` cookie (`path=/`,
+  `SameSite=Strict`) that gated custom routes can check. Reconnect with jittered exponential backoff,
+  capped at 5 s.
 - `wss:` when the page is https (tunnel).
 - Never retry after `reject`/`kicked`/`replaced`.
+- `pmc.moved`: auto-follow only https→https after a reachability check; a LAN (`http://`) page never navigates
+  itself — show "re-scan the QR" on the `moved` event.
 - `vibrate(pattern)` feature-detects. `wakeLock()` requests a screen wake lock when available (secure contexts only) and falls back silently.
+- `timestamp()` stamps inputs on the estimated host clock; hosts should credit them bounded by the player's
+  RTT (also exposed as `player.rtt_ms`) so remote players stay competitive.
 - Zero dependencies, no build step for consumers.
 
 ## 5. Outside-LAN join: one-click Cloudflare Quick Tunnel

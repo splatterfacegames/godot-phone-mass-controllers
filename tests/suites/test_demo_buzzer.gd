@@ -110,6 +110,53 @@ func run(t) -> void:
 	t.eq(m.scores[1], 0, "new match resets scores")
 	t.eq(m.round_no, 1)
 
+	t.section("timestamped buzz: credited at tap time")
+	var g2 = Game.new(42)
+	g2.start_round([1, 2], 0)
+	g2.tick(1500)
+	g2.secrets[1] = g2.flash_symbol
+	g2.secrets[2] = (g2.flash_symbol + 1) % Game.SYMBOLS.size()
+	g2.tick(2900) # the flash has moved on
+	# p1 tapped at 2800 while their symbol still showed; the packet lands at 3050
+	t.eq(g2.buzz(1, 2800, 3050)["result"], Game.Buzz.WIN, "tap-while-showing wins even when it arrives late")
+	t.eq(g2.buzz(2, 8000, 8000)["result"], Game.Buzz.IDLE, "still idle after the round")
+
+	t.section("earlier tap steals the win inside the window")
+	var g3 = Game.new(9)
+	g3.start_round([1, 2], 0)
+	g3.tick(1500)
+	g3.secrets[1] = g3.flash_symbol
+	g3.secrets[2] = g3.flash_symbol # shared symbol, as happens with more players than symbols
+	t.eq(g3.buzz(2, 1800, 1800)["result"], Game.Buzz.WIN)
+	t.eq(g3.winner_id, 2)
+	t.eq(g3.buzz(1, 1700, 1900)["result"], Game.Buzz.WIN, "earlier tap wins although it arrived later")
+	t.eq(g3.winner_id, 1)
+	t.eq(g3.scores[1], 1)
+	t.eq(g3.scores[2], 0, "the score moves with the win")
+
+	t.section("late taps can't steal")
+	var g4 = Game.new(9)
+	g4.start_round([1, 2], 0)
+	g4.tick(1500)
+	g4.secrets[1] = g4.flash_symbol
+	g4.secrets[2] = g4.flash_symbol
+	t.eq(g4.buzz(2, 1800, 1800)["result"], Game.Buzz.WIN)
+	t.eq(g4.buzz(1, 1900, 1900)["result"], Game.Buzz.IDLE, "a later tap doesn't steal")
+	t.eq(g4.buzz(1, 1700, 1800 + Game.STEAL_MS + 1)["result"], Game.Buzz.IDLE, "outside the steal window")
+	t.eq(g4.winner_id, 2)
+
+	t.section("steal across different flashes")
+	var g5 = Game.new(11)
+	g5.start_round([1, 2], 0)
+	g5.tick(1500)
+	g5.secrets[1] = g5.flash_symbol # p1's symbol shows first
+	g5.tick(2900)
+	g5.secrets[2] = g5.flash_symbol # then p2's
+	t.eq(g5.buzz(2, 3000, 3000)["result"], Game.Buzz.WIN)
+	# p1 tapped way back at 1600, while their symbol was up; the packet only lands now.
+	t.eq(g5.buzz(1, 1600, 3200)["result"], Game.Buzz.WIN, "a much earlier tap steals across flashes")
+	t.eq(g5.winner_id, 1)
+
 	t.section("late joiner gets an unused secret")
 	var l = Game.new(11)
 	l.start_round([1, 2, 3], 0)

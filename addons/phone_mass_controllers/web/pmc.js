@@ -36,6 +36,7 @@ export class PMCClient {
     this._timers = {};
     this._offsets = [];
     this._offset = 0;
+    this._rtts = [];
     this._lastPong = 0;
     this._authWaiters = [];
     this._stopped = false;
@@ -56,7 +57,7 @@ export class PMCClient {
     try { v ? localStorage.setItem(this._key, v) : localStorage.removeItem(this._key); } catch {}
   }
 
-  /** Events: welcome, message, binary, status, reject, kicked, replaced, auth. */
+  /** Events: welcome, message, binary, status, reject, kicked, replaced, auth, moved. */
   on(ev, fn) {
     if (!this._on.has(ev)) this._on.set(ev, new Set());
     this._on.get(ev).add(fn);
@@ -114,9 +115,23 @@ export class PMCClient {
     if (!this._ws) this._open();
   }
 
-  /** Host clock in ms (median offset of the last 5 ping/pong samples). */
+  /** Host clock in Unix epoch ms (median offset of the last 5 ping/pong samples). */
   serverNow() {
     return Date.now() + this._offset;
+  }
+
+  /**
+   * Host-clock timestamp for stamping inputs, e.g. `pmc.send({type: 'buzz', at: pmc.timestamp()})`.
+   * Lets the host order competing inputs fairly; compensation is bounded by each player's RTT.
+   */
+  timestamp() {
+    return this.serverNow();
+  }
+
+  /** Rolling average round-trip time in ms from ping/pong (0 until the first pong). */
+  get rttMs() {
+    if (!this._rtts.length) return 0;
+    return Math.round(this._rtts.reduce((a, b) => a + b, 0) / this._rtts.length);
   }
 
   _send(obj, force = false) {
@@ -173,6 +188,8 @@ export class PMCClient {
         clearTimeout(this._timers.hello);
         this._attempt = 0;
         this.token = m.token;
+        // The host accepts this cookie (or ?t=) on gated custom routes.
+        try { globalThis.document && (document.cookie = `pmc_token=${m.token}; path=/; SameSite=Strict`); } catch {}
         Object.assign(this, { id: m.id, name: m.name ?? this.name, profile: m.profile ?? this.profile, admin: !!m.admin, joinUrl: m.join_url ?? '' });
         if (!this._offsets.length && typeof m.server_ms === 'number') this._offset = m.server_ms - Date.now();
         this._lastPong = Date.now();
@@ -188,6 +205,7 @@ export class PMCClient {
       case 'pmc.reject': this._stopped = true; return this._emit('reject', { code: m.code, reason: m.reason });
       case 'pmc.kicked': this._stopped = true; return this._emit('kicked', m.reason ?? '');
       case 'pmc.replaced': this._stopped = true; return this._emit('replaced');
+      case 'pmc.moved': return this._onMoved(m.d?.url);
     }
   }
 
@@ -201,10 +219,26 @@ export class PMCClient {
     const now = Date.now();
     this._lastPong = now;
     if (typeof c !== 'number' || typeof s !== 'number') return;
-    // Symmetric latency: the host clock at `now` is s + rtt/2.
+    this._rtts = [...this._rtts, now - c].slice(-5);
+    // Symmetric latency: the host clock at `now` is s + rtt/2. (s is Unix epoch ms.)
     this._offsets = [...this._offsets, s + (now - c) / 2 - now].slice(-5);
     const o = [...this._offsets].sort((a, b) => a - b), mid = o.length >> 1;
     this._offset = o.length % 2 ? o[mid] : (o[mid - 1] + o[mid]) / 2;
+  }
+
+  // The join URL moved (the host sends this before an ephemeral tunnel URL dies). Surface the
+  // 'moved' event so the page can ask for a re-scan. Auto-follow only https→https after a
+  // reachability check — never silently navigate a LAN (http) page.
+  _onMoved(url) {
+    this._emit('moved', { url: typeof url === 'string' ? url : '' });
+    const loc = globalThis.location;
+    if (!loc || loc.protocol !== 'https:' || typeof url !== 'string' || !url) return;
+    let next;
+    try { next = new URL(url, loc.href); } catch { return; }
+    if (next.protocol !== 'https:' || next.origin === loc.origin) return;
+    globalThis.fetch?.(next.href, { mode: 'no-cors', cache: 'no-store' })
+      .then(() => loc.replace(next.href))
+      .catch(() => {});
   }
 
   _retry() {

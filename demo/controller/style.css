@@ -210,6 +210,13 @@ button.danger { background: none; border: 2px solid var(--bad); color: var(--bad
   color: #1a1400;
   animation: pulse 1.2s infinite alternate;
 }
+.banner.moved {
+  position: fixed;
+  left: 0; right: 0;
+  background: var(--bad);
+  color: #fff;
+  animation: pulse .6s infinite alternate;
+}
 
 .ended { min-height: 100vh; justify-content: center; text-align: center; }
 .ended h2 { font-size: 24px; color: var(--text); text-transform: none; letter-spacing: 0; }

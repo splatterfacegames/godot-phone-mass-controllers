@@ -1,13 +1,13 @@
 // Buzzer Party phone controller. Plain ES module; the SDK is served by the Godot host.
 //
 // Game messages (JSON `d`):
-//   host -> phone  {type:"state", phase, round, target, winner, match_winner, players:[{id,name,color,emoji,score,connected,admin}]}
+//   host -> phone  {type:"state", phase, round, target, winner, match_winner, players:[{id,name,color,emoji,score,connected,admin,rtt}]}
 //                  {type:"secret", round, for, symbol:{id,label,color,shape}}   (private, only to `for`)
 //                  {type:"flash", round, symbol, seq}                          (what the big screen shows)
 //                  {type:"buzz", result:"win"|"wrong"|"locked"|"idle", locked_ms} (private)
-//   phone -> host  {type:"buzz"}
+//   phone -> host  {type:"buzz", at}     (at = pmc.timestamp(): host-clock tap time, RTT-bounded)
 //                  {type:"admin", action:"start"|"next"|"reset"|"kick", id?}
-//   binary         any bytes are echoed back to the sender (used here as a latency probe)
+//   binary         any bytes are echoed back to the sender
 import { connect, vibrate, wakeLock } from '/pmc/pmc.js';
 
 const COLORS = ['#ff5a5f', '#ff8c42', '#ffc53d', '#2ec27e', '#26c6da', '#3d8bfd', '#a371f7', '#ff6fb5'];
@@ -87,11 +87,7 @@ function start() {
     paintMe();
   });
   pmc.on('message', onMessage);
-  pmc.on('binary', (buf) => {
-    if (buf.byteLength !== 8) return;
-    const sent = new Float64Array(buf)[0];
-    $('latency').textContent = `${Math.round(performance.now() - sent)} ms`;
-  });
+  pmc.on('moved', () => { $('moved').hidden = false; }); // join URL changed: ask for a re-scan
   pmc.on('reject', ({ code, reason }) => {
     const badCode = code === 'bad_code';
     end(badCode ? 'Room code needed' : 'Could not join', badCode ? 'Enter the code shown on the big screen.' : reason || code, badCode);
@@ -101,8 +97,8 @@ function start() {
 }
 
 setInterval(() => {
-  if (pmc?.status === 'open') pmc.sendBinary(new Float64Array([performance.now()]));
-}, 3000);
+  $('latency').textContent = pmc?.rttMs ? `${pmc.rttMs} ms` : '– ms';
+}, 1000);
 
 function end(title, text, askCode = false) {
   $('ended-title').textContent = title;
@@ -211,7 +207,9 @@ function renderBuzzer() {
 $('buzzer').addEventListener('pointerdown', (ev) => {
   ev.preventDefault();
   if ($('buzzer').disabled) return;
-  pmc.send({ type: 'buzz' });
+  // Stamp the tap on the host clock: the host credits it bounded by our RTT, so a
+  // remote player isn't beaten by a local one just because the tunnel is slower.
+  pmc.send({ type: 'buzz', at: pmc.timestamp() });
   vibrate(25);
 });
 
