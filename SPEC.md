@@ -42,6 +42,21 @@ One TCP port serves both HTTP/1.1 and WebSocket (RFC 6455), so a single tunnel h
   Per-frame I/O budget, so a slow phone can't stall the game.
 - `bind_address` default `"*"`. `port` default 8080. If busy, try the next port up to `port + port_search`
   (default 20), and emit/return the actual port.
+- Delivery order is guaranteed **per player (per socket), not across players**: `send`/`broadcast` queue
+  frames that are flushed in the host's round-robin service order, so a frame queued for socket A and then
+  one for socket B can reach B first. Tests and game logic must not rely on cross-player arrival order.
+
+Known limits of the built-in server (deliberate scope cuts — use the Cloudflare tunnel for `https`/`wss`):
+
+- **No TLS.** Plain `http`/`ws` on the LAN. `start_tunnel()` is the supported way to get TLS.
+- **No permessage-deflate** — extensions are never negotiated.
+- **Request bodies:** `Content-Length` only; `Transfer-Encoding: chunked` gets 501.
+- **Caching:** no `ETag`/`If-None-Match`. `Range` supports a single range; multi-ranges are ignored (200).
+- **Symlinks** in served trees are resolved and confined to the served root (403 on escape).
+- **Reverse proxies:** only `CF-Connecting-IP` is trusted, and only while the tunnel is up. `Forwarded`/
+  `X-Forwarded-For` are ignored, so per-address limits behind another proxy see the proxy's address.
+- **Origin:** not checked on the WS upgrade by default; `check_origin` + `allowed_origins` opt in.
+- The join URL is IPv4-only (see §3 `lan_addresses`).
 
 ## 2. Wire protocol
 

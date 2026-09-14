@@ -50,6 +50,8 @@ func run(t) -> void:
 	await _traversal(t)
 	await _mime(t)
 	await _routes(t)
+	await _symlinks(t)
+	await _origin(t)
 	await _ranges(t)
 	await _timeouts(t)
 	await _garbage(t)
@@ -273,6 +275,51 @@ func _routes(t) -> void:
 	host.remove_route("/api/")
 	r = await _fetch(t, "/api/echo")
 	t.eq(r.get("status"), 404, "remove_route")
+
+
+func _symlinks(t) -> void:
+	t.section("symlink confinement")
+	# A symlink inside the served tree pointing outside must not be served.
+	var da := DirAccess.open(root)
+	var err := da.create_link(root.path_join("secret.txt"), root.path_join("www/evil.txt"))
+	if err != OK:
+		t.note("symlink creation failed (%s) — skipping confinement checks" % error_string(err))
+		return
+	var r := await _fetch(t, "/evil.txt")
+	t.eq(r.get("status"), 403, "symlink to outside file refused")
+	t.ok(not r.body.get_string_from_utf8().contains("TOP SECRET"), "no secret bytes leaked")
+	err = da.create_link(root.path_join("extra"), root.path_join("www/updir"))
+	if err == OK:
+		r = await _fetch(t, "/updir/asset.txt")
+		t.eq(r.get("status"), 403, "symlinked dir pointing outside refused")
+	else:
+		t.note("dir link creation failed (%s)" % error_string(err))
+	# A symlink pointing INSIDE the served tree still works.
+	err = da.create_link(root.path_join("www/sub/deep.txt"), root.path_join("www/inner.txt"))
+	if err == OK:
+		r = await _fetch(t, "/inner.txt")
+		t.eq(r.body.get_string_from_utf8(), "deep", "symlink inside the tree still served")
+	else:
+		t.note("inner link creation failed (%s)" % error_string(err))
+
+
+func _origin(t) -> void:
+	t.section("WebSocket Origin check")
+	host.check_origin = true
+	host.allowed_origins = PackedStringArray(["http://ok.example"])
+	var bad := PMCTestSocket.new(t)
+	await bad.connect_to(port)
+	var rs: Array = await bad.http("GET /pmc/ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: http://evil.example\r\n\r\n")
+	t.eq(rs[0].status if rs.size() > 0 else -1, 403, "disallowed origin refused")
+	bad.close()
+	var ws := PMCTestWs.new(t)
+	t.ok(await ws.open(port, "/pmc/ws", "Origin: http://ok.example\r\n"), "allowed origin upgrades")
+	ws.close()
+	var bare := PMCTestWs.new(t)
+	t.ok(await bare.open(port), "no Origin header still allowed (non-browser client)")
+	bare.close()
+	host.check_origin = false
+	host.allowed_origins = PackedStringArray()
 
 
 func _ranges(t) -> void:

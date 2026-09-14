@@ -113,6 +113,14 @@ signal tunnel_state_changed(state: String, url: String)
 ## This is the global budget that sits on top of the per-connection and per-address lockouts: it stops a
 ## distributed brute-force run against a publicly tunneled host.
 @export var admin_pin_max_failures := 20
+## When on, a WebSocket upgrade with an [code]Origin[/code] header not in [member allowed_origins] is
+## refused with 403. Auth is by token and join code, so the risk without it is low — enable it on a
+## tunneled host to stop arbitrary websites driving the socket from a visitor's browser. Clients that
+## send no Origin (non-browser tools) are not affected.
+@export var check_origin := false
+## Origin header values allowed to open the WebSocket when [member check_origin] is on, e.g.
+## [code]"http://192.168.1.5:8080"[/code]. Exact match on scheme://host[:port].
+@export var allowed_origins := PackedStringArray()
 
 @export_group("Tunnel")
 ## Let [method start_tunnel] download cloudflared if it isn't found.
@@ -815,6 +823,11 @@ func _upgrade(c: PMCConnection, req: PMCHttpRequest, now: int) -> void:
 	if key.length() != 24 or not key.ends_with("==") or Marshalls.base64_to_raw(key).size() != 16:
 		_respond(c, req, PMCHttpResponse.error(400, "bad Sec-WebSocket-Key"), false)
 		return
+	if check_origin:
+		var origin := req.header("origin").strip_edges()
+		if origin != "" and not allowed_origins.has(origin):
+			_respond(c, req, PMCHttpResponse.error(403, "origin not allowed"), false)
+			return
 	var resp := PMCHttpResponse.new()
 	resp.status = 101
 	resp.headers["Upgrade"] = "websocket"

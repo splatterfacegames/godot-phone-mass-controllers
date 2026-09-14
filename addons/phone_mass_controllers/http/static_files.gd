@@ -27,6 +27,9 @@ const MIME := {
 
 const _NO_CACHE_EXT := ["html", "htm", "js", "mjs", "css", "json", "ts", "webmanifest"]
 
+# is_link/read_link are DirAccess instance methods; absolute paths ignore the opened dir.
+static var _link_probe: DirAccess = null
+
 
 ## MIME type for a file path (by extension). Defaults to [code]application/octet-stream[/code].
 static func mime_for(path: String) -> String:
@@ -93,7 +96,73 @@ static func serve(root: String, rel: String, req: PMCHttpRequest, index_file := 
 		return null
 	if req.method != "GET" and req.method != "HEAD":
 		return PMCHttpResponse.error(405).set_header("Allow", "GET, HEAD")
+	if not confined_under(root, p):
+		return PMCHttpResponse.error(403, "path escapes the served directory")
 	return file_response(p, req)
+
+
+## Whether [param path] stays inside [param root] once every symlink component is resolved
+## ([param root] itself is trusted as the mount point). Used to confine served files.
+static func confined_under(root: String, path: String) -> bool:
+	var rr := canonical_path(root)
+	var rp := canonical_path(path)
+	if rr == "" or rp == "":
+		return false
+	if not rr.ends_with("/"):
+		rr += "/"
+	return rp + "/" == rr or rp.begins_with(rr)
+
+
+## The absolute path with every symlink component resolved ([code]res://[/code]/[code]user://[/code] are
+## globalized first). Components that don't exist are kept as-is. Returns [code]""[/code] on a link loop.
+static func canonical_path(path: String) -> String:
+	var p := path
+	if p.begins_with("res://") or p.begins_with("user://"):
+		p = ProjectSettings.globalize_path(p)
+	for i in 40:
+		var next := _expand_links_once(p)
+		if next == "":
+			return ""
+		if next == p:
+			return p
+		p = next
+	return ""
+
+
+# One resolution pass over each existing component; link targets may themselves contain links, so the
+# caller repeats until the path stops changing.
+static func _expand_links_once(path: String) -> String:
+	var segs := path.split("/", false)
+	var cur := "/" if path.begins_with("/") else ""
+	var expanded := false
+	for s in segs:
+		cur = cur + s if cur == "" or cur.ends_with("/") else cur + "/" + s
+		if _is_link(cur):
+			var tgt := _read_link(cur).replace("\\", "/")
+			if tgt == "":
+				return ""
+			if tgt.begins_with("//?/"):
+				tgt = tgt.substr(4)
+			cur = tgt if tgt.is_absolute_path() or tgt.begins_with("/") else cur.get_base_dir() + "/" + tgt
+			cur = cur.simplify_path()
+			expanded = true
+	return cur if expanded else path
+
+
+static func _probe() -> DirAccess:
+	if _link_probe == null:
+		_link_probe = DirAccess.open(".")
+	return _link_probe
+
+
+static func _is_link(path: String) -> bool:
+	var d := _probe()
+	return d != null and d.is_link(path)
+
+
+static func _read_link(path: String) -> String:
+	var d := _probe()
+	return d.read_link(path) if d != null else ""
 
 
 ## A streamed file response with single-range support ([code]Range: bytes=a-b[/code] -> 206).
