@@ -51,6 +51,16 @@ on the first user gesture (the join button tap counts). The same secure-context 
 clipboard and some sensor APIs on LAN pages; running the party over the https tunnel is the real fix
 when keeping screens on matters.
 
+## Two tabs in one browser share a player
+
+The rejoin token lives in `localStorage`, which is keyed by origin — so two tabs in one browser
+profile count as the **same player**. The newer tab's hello wins and the host closes the older tab's
+socket with `pmc.replaced` (close code 4002). That's by design: it's what makes reloads seamless.
+
+It does surprise developers faking several "phones" in one desktop browser. Options: separate
+browser profiles, incognito windows, or `connect({ tokenKey: 'tab-2' })` per tab — the token lands
+under your key and each tab keeps its own identity.
+
 ## Ephemeral tunnel URLs
 
 Quick Tunnel URLs change every run (and can change mid-session if the tunnel restarts). When the

@@ -1,9 +1,9 @@
 // pmc.js SDK behaviours against the real headless Godot host:
-// rttMs/timestamp, the pmc_token cookie, and the pmc.moved event.
+// rttMs/timestamp, the pmc_token cookie, tokenKey identities, pmc.moved, feedback/keepScreenOn.
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  join, launchBrowser, newPhone, scriptErrors, startHost, waitFor,
+  join, launchBrowser, newPhone, scriptErrors, sleep, startHost, waitFor,
 } from './lib/harness.mjs';
 
 describe('pmc.js SDK (real Godot host)', { timeout: 120000 }, () => {
@@ -41,6 +41,24 @@ describe('pmc.js SDK (real Godot host)', { timeout: 120000 }, () => {
     await join(p, host, { name: 'Cole' });
     const cookie = await p.page.evaluate(() => document.cookie);
     assert.match(cookie, /pmc_token=[0-9a-f]{32}/);
+    await p.ctx.close();
+  });
+
+  it('connect({tokenKey}) gives a second "phone" its own identity in one browser', async () => {
+    const p = await newPhone(browser, 'Kit');
+    const first = await join(p, host, { name: 'Kit' });
+    // Same browser context, same origin — but a different tokenKey means a different player.
+    const second = await p.page.evaluate(() => new Promise((resolve, reject) => {
+      import('/pmc/pmc.js').then(({ connect }) => {
+        const c = connect({ name: 'Kit-2', tokenKey: 'pmc.test.identity' });
+        c.on('welcome', (w) => resolve(w.id));
+        setTimeout(() => reject(new Error('no welcome')), 8000);
+      });
+    }));
+    assert.notEqual(second, first, 'distinct player ids');
+    await sleep(1500);
+    assert.equal(await p.page.evaluate(() => window.pmc.status), 'open', 'first socket not replaced');
+    assert.equal(p.frames.some((f) => f.json?.t === 'pmc.replaced'), false);
     await p.ctx.close();
   });
 

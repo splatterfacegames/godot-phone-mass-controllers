@@ -167,9 +167,9 @@ pmc.setProfile({name, profile}); pmc.leave();
 pmc.id; pmc.serverNow(); pmc.timestamp();  // host-clock ms, offset-corrected
 pmc.rttMs;                            // rolling avg round-trip ms
 ```
-- Token in localStorage, keyed by origin. Also mirrored to a `pmc_token` cookie (`path=/`,
-  `SameSite=Strict`) that gated custom routes can check. Reconnect with jittered exponential backoff,
-  capped at 5 s.
+- Token in localStorage, keyed by origin (two tabs in one browser = same player; `tokenKey` overrides for
+  per-tab identities). Also mirrored to a `pmc_token` cookie (`path=/`, `SameSite=Strict`) that gated custom
+  routes can check. Reconnect with jittered exponential backoff, capped at 5 s.
 - `wss:` when the page is https (tunnel).
 - Never retry after `reject`/`kicked`/`replaced`.
 - `pmc.moved`: auto-follow only https→https after a reachability check; a LAN (`http://`) page never navigates

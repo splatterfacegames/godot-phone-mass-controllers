@@ -49,6 +49,9 @@
 - **Rejoin:** the token from `pmc.welcome` goes into localStorage (and is mirrored to a
   `pmc_token` cookie with `SameSite=Strict`, which gated custom routes can check). A reload or reconnect
   sends it back, and the host resumes the same player (same id and meta) within `grace_seconds`, or later via `remember_seconds`.
+- **One token per origin:** two tabs in one browser profile share the localStorage token, so they count as the
+  same player — the newer tab wins and the older one gets `replaced`. For per-tab identities while developing,
+  pass a different `opts.tokenKey` per tab (or use separate browser profiles / incognito windows).
 - **Reconnect:** uses exponential backoff from 250 ms with "equal jitter", capped at 5 s. It also retries straight away when
   the page becomes visible again, because mobile browsers suspend background sockets.
 - **Terminal states:** after `reject`, `kicked` or `replaced` (close codes 4000/4001/4002), the client never retries on its own.

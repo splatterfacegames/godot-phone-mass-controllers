@@ -93,6 +93,8 @@ Phone browsers have quirks desktop ones don't — worth knowing before you ship 
   60–120 s so a pocketed phone isn't "gone", and call `keepScreenOn()` so it doesn't lock mid-game.
 - **Wake lock needs a secure context** — unavailable on plain `http://` LAN pages. `keepScreenOn()`
   falls back to a muted looping clip; the https tunnel is the real fix.
+- **Two tabs in one browser share a player** (the token lives in localStorage): the newer tab replaces
+  the older. Use incognito windows or `connect({ tokenKey })` to fake several phones while developing.
 
 Details and workarounds: [docs/mobile-browsers.md](docs/mobile-browsers.md).
 
