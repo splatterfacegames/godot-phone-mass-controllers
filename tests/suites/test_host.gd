@@ -579,11 +579,11 @@ func _qr_tunnel(t) -> void:
 	t.eq(states.map(func(x): return x[0]), ["starting", "ready"], "states forwarded")
 	t.eq(states[1][1], "https://random-words.trycloudflare.com", "ready carries URL")
 	t.eq(host.advertise_url, "https://random-words.trycloudflare.com", "advertise_url set")
-	var code_ok := host.join_code.length() == 4
+	var code_ok := host.join_code.length() == 6
 	for ch in host.join_code:
 		if ch < "A" or ch > "Z":
 			code_ok = false
-	t.ok(code_ok, "4-letter join code generated (%s)" % host.join_code)
+	t.ok(code_ok, "6-letter join code generated while tunneled (%s)" % host.join_code)
 	t.eq(urls.size(), 1, "one join_url_changed on ready")
 	t.eq(host.join_url(), "https://random-words.trycloudflare.com/?code=" + host.join_code, "tunnel join URL")
 	host.stop_tunnel()

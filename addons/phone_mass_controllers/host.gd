@@ -109,6 +109,10 @@ signal tunnel_state_changed(state: String, url: String)
 @export var join_code_max_failures := 10
 ## How long an address is blocked after too many wrong join codes. New joins from it are refused with [code]bad_code[/code].
 @export var join_code_block_seconds := 60.0
+## Wrong admin PIN attempts across the whole host before the PIN is disabled until restart (0 = unlimited).
+## This is the global budget that sits on top of the per-connection and per-address lockouts: it stops a
+## distributed brute-force run against a publicly tunneled host.
+@export var admin_pin_max_failures := 20
 
 @export_group("Tunnel")
 ## Let [method start_tunnel] download cloudflared if it isn't found.
@@ -160,6 +164,8 @@ var _tunnel: Object = null
 var _tunnel_prev_advertise := ""
 var _tunnel_set_advertise := false
 var _tunnel_generated_code := false
+var _auth_fail_total := 0
+var _auth_disabled := false
 var _stats := {
 	"http_requests": 0, "ws_messages_in": 0, "ws_messages_out": 0, "bytes_in": 0, "bytes_out": 0,
 	"last_poll_usec": 0, "max_poll_usec": 0, "accepted": 0, "refused": 0,
@@ -262,6 +268,8 @@ func _shutdown(graceful: bool) -> void:
 	_banned.clear()
 	_addr_conns.clear()
 	_addr_failures.clear()
+	_auth_fail_total = 0
+	_auth_disabled = false
 	if _server != null:
 		_server.stop()
 		_server = null
@@ -533,14 +541,38 @@ func remove_route(prefix: String) -> void:
 
 
 ## Serves files from [param dir] (absolute, res:// or user://) under URL [param prefix], e.g.
-## [code]serve_directory("/assets/", "user://assets")[/code]. Paths are traversal-safe. Longest prefix wins.
-func serve_directory(prefix: String, dir: String) -> void:
+## [code]serve_directory("/assets/", "user://assets")[/code]. Paths are traversal-safe, and symlinks that
+## resolve outside [param dir] are refused. Longest prefix wins.
+## With [param players_only], requests must identify a joined player via [code]?t=<token>[/code] or the
+## [code]pmc_token[/code] cookie (see [method require_player]); others get 403.
+func serve_directory(prefix: String, dir: String, players_only := false) -> void:
 	var pre := prefix if prefix.begins_with("/") else "/" + prefix
 	if not pre.ends_with("/"):
 		pre += "/"
 	_mounts = _mounts.filter(func(m: Dictionary) -> bool: return m.prefix != pre)
-	_mounts.append({"prefix": pre, "dir": dir})
+	_mounts.append({"prefix": pre, "dir": dir, "players_only": players_only})
 	_mounts.sort_custom(func(x: Dictionary, y: Dictionary) -> bool: return x.prefix.length() > y.prefix.length())
+
+
+## The joined [PMCPlayer] behind an HTTP request, or [code]null[/code]. The caller authenticates with the
+## rejoin token as [code]?t=<token>[/code] or the [code]pmc_token[/code] cookie (pmc.js sets it after join).
+## In a route handler: [code]var p := host.require_player(req); if p == null: return PMCHttpResponse.error(403)[/code].
+func require_player(req: PMCHttpRequest) -> PMCPlayer:
+	var token := String(req.query.get("t", "")).strip_edges()
+	if token == "":
+		token = cookie_value(req, "pmc_token")
+	if token == "":
+		return null
+	return _by_token.get(token)
+
+
+## A single cookie from the request's Cookie header, or [code]""[/code].
+static func cookie_value(req: PMCHttpRequest, name: String) -> String:
+	for part in req.header("cookie").split(";", false):
+		var eq := part.find("=")
+		if eq > 0 and part.substr(0, eq).strip_edges() == name:
+			return part.substr(eq + 1).strip_edges()
+	return ""
 
 
 ## The [code]/pmc/info.json[/code] payload.
@@ -564,8 +596,12 @@ func _route(req: PMCHttpRequest) -> PMCHttpResponse:
 			"/pmc/healthz":
 				return PMCHttpResponse.text("ok\n").set_header("Cache-Control", "no-cache")
 			"/pmc/info.json":
+				if not _meta_endpoint_allowed(req):
+					return PMCHttpResponse.error(403, "join code required")
 				return PMCHttpResponse.json(info())
 			"/pmc/qr.png":
+				if not _meta_endpoint_allowed(req):
+					return PMCHttpResponse.error(403, "join code required")
 				return _qr_response(req)
 		return PMCStaticFiles.serve(WEB_DIR, path.substr(5), req, "")
 	for r in _routes:
@@ -578,12 +614,25 @@ func _route(req: PMCHttpRequest) -> PMCHttpResponse:
 				return PMCHttpResponse.error(500, "route handler returned %s" % type_string(typeof(out)))
 	for m in _mounts:
 		if path.begins_with(m.prefix):
+			if m.get("players_only", false) and require_player(req) == null:
+				return PMCHttpResponse.error(403, "player token required")
 			var resp := PMCStaticFiles.serve(m.dir, path.substr(m.prefix.length()), req)
 			if resp != null:
 				return resp
 	if controller_dir != "":
 		return PMCStaticFiles.serve(controller_dir, path, req)
 	return null
+
+
+# While a tunnel is up the host is reachable from the public internet, and info.json / qr.png reveal the
+# join URL including the join code. They answer only to loopback or to a request carrying a valid ?code=.
+func _meta_endpoint_allowed(req: PMCHttpRequest) -> bool:
+	if _tunnel == null:
+		return true
+	if _is_loopback(req.remote_address):
+		return true
+	var given := String(req.query.get("code", "")).strip_edges()
+	return join_code != "" and given.to_upper() == join_code.strip_edges().to_upper()
 
 
 func _qr_response(req: PMCHttpRequest) -> PMCHttpResponse:
@@ -1210,9 +1259,13 @@ func _reject(c: PMCConnection, code: String, reason: String) -> void:
 
 func _on_auth(c: PMCConnection, p: PMCPlayer, m: Dictionary, now: int) -> void:
 	# Per connection: 5 failures -> 30 s. Per address (so reconnecting doesn't reset it): 20 failures -> 60 s.
+	# Global: admin_pin_max_failures across all addresses disables the PIN until restart.
 	var locked := maxi(c.auth_locked_until_msec - now, _blocked_ms("auth", c.client_address, now))
 	if locked > 0:
 		_send_json(c, {"t": "pmc.auth", "ok": false, "locked_ms": locked})
+		return
+	if _auth_disabled:
+		_send_json(c, {"t": "pmc.auth", "ok": false, "disabled": true})
 		return
 	var pin = m.get("pin")
 	var ok := admin_pin != "" and typeof(pin) == TYPE_STRING and _secure_equals(String(pin), admin_pin)
@@ -1224,10 +1277,13 @@ func _on_auth(c: PMCConnection, p: PMCPlayer, m: Dictionary, now: int) -> void:
 			admin_authenticated.emit(p)
 		return
 	c.auth_failures += 1
+	_auth_fail_total += 1
 	if c.auth_failures >= _AUTH_MAX_FAILURES:
 		c.auth_failures = 0
 		c.auth_locked_until_msec = now + _AUTH_LOCK_MSEC
 	_record_failure("auth", c.client_address, now, _AUTH_ADDR_MAX_FAILURES, _AUTH_ADDR_LOCK_MSEC)
+	if admin_pin_max_failures > 0 and _auth_fail_total >= admin_pin_max_failures:
+		_auth_disabled = true
 	_send_json(c, {"t": "pmc.auth", "ok": false})
 
 
@@ -1305,7 +1361,7 @@ func _on_tunnel_state(state: String, detail: String) -> void:
 				_tunnel_set_advertise = true
 			advertise_url = url
 			if join_code == "":
-				join_code = _generate_code()
+				join_code = _generate_code(6)
 				_tunnel_generated_code = true
 			_suppress_url_signal = false
 			tunnel_state_changed.emit("ready", url)
@@ -1341,8 +1397,8 @@ func _restore_after_tunnel(emit: bool) -> void:
 		join_url_changed.emit(join_url())
 
 
-func _generate_code() -> String:
-	var bytes := _crypto.generate_random_bytes(4)
+func _generate_code(length := 4) -> String:
+	var bytes := _crypto.generate_random_bytes(length)
 	var s := ""
 	for b in bytes:
 		s += _CODE_ALPHABET[b % _CODE_ALPHABET.length()]

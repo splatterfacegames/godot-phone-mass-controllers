@@ -67,10 +67,17 @@ Host → client:
 | `pmc.welcome` | `id:int`, `token:string`, `name`, `profile`, `rejoined:bool`, `admin:bool`, `server_ms:int` (epoch ms UTC), `join_url:string` | |
 | `pmc.reject` | `code:string` (`bad_code`, `full`, `version`, `banned`, `bad_hello`), `reason:string` | then close 4000 |
 | `pmc.pong` | `c`, `s:int` (epoch ms UTC) | clock-offset estimate; `s` is wall-clock epoch ms, so `serverNow()` is comparable to `turn_ends_at_ms`-style deadlines stamped from `Time.get_unix_time_from_system() * 1000` |
-| `pmc.auth` | `ok:bool` | 5 failures → 30 s lockout per connection |
+| `pmc.auth` | `ok:bool`, `locked_ms?:int`, `disabled?:bool` | 5 failures → 30 s per connection; 20 per address → 60 s; `admin_pin_max_failures` (default 20) across all addresses disables the PIN until restart (`disabled:true`) |
 | `pmc.kicked` | `reason:string` | then close 4001 |
 | `pmc.replaced` | | same token connected elsewhere, then close 4002 |
 | `msg` | `d:any` | game message |
+
+HTTP auth for custom routes: after join, pmc.js sets a `pmc_token` cookie (value = the rejoin token).
+`require_player(req)` maps `?t=<token>` or that cookie to the joined player; serve nothing private without it.
+
+While a tunnel is up the host is public: auto-generated join codes are 6 chars (24^6), and
+`/pmc/info.json` + `/pmc/qr.png` (which reveal the join URL) answer only to loopback or a request
+carrying a valid `?code=`. The controller page and `/pmc/pmc.js` stay public — phones need them to join.
 
 Identity: the token is a random 128-bit hex string issued by the host. The same token reconnecting within
 `grace_seconds` resumes the same `PMCPlayer` (same id, meta preserved) and emits `player_rejoined`. After grace
@@ -97,6 +104,8 @@ class_name PMCHost extends Node
 @export var advertise_url := ""                       # override join URL (else best LAN IPv4, or tunnel URL)
 @export var max_message_bytes := 1 << 20
 @export var autostart := false
+# limits (selected): max_connections, max_connections_per_address, join_code_max_failures,
+# join_code_block_seconds, admin_pin_max_failures (global PIN budget, default 20), header/body sizes, timeouts
 
 signal started(port: int)
 signal stopped
@@ -123,7 +132,8 @@ func send(to, data) -> void                           # to: PMCPlayer | int; dat
 func broadcast(data, filter: Callable = Callable()) -> void   # filter(player) -> bool
 func kick(to, reason := "", ban := false, remember := false) -> void   # remember: keep a tombstone so the token rejoins with id+meta; ban: refuse the token
 func add_route(prefix: String, handler: Callable) -> void     # handler(req: PMCHttpRequest) -> PMCHttpResponse or null (fall through)
-func serve_directory(prefix: String, dir: String) -> void     # e.g. serve_directory("/assets/", "C:/game/assets") — absolute or res:// or user://
+func serve_directory(prefix: String, dir: String, players_only := false) -> void  # players_only: require a joined player's token (?t= or pmc_token cookie) else 403
+func require_player(req: PMCHttpRequest) -> PMCPlayer          # player for ?t=<token> or the pmc_token cookie, else null → respond 403
 func start_tunnel() -> void                           # one-click outside-LAN (see §5); sets advertise URL on success
 func stop_tunnel() -> void
 signal tunnel_state_changed(state: String, url: String)       # "downloading" | "starting" | "ready" | "failed" | "stopped"
