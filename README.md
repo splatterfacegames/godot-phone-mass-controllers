@@ -21,7 +21,9 @@ players outside your LAN.
 - **QR built in.** A pure-GDScript QR encoder (all versions/EC levels), checked against ZXing and the `qrcode` npm package.
 - **One-click outside-LAN play.** `host.start_tunnel()` fetches `cloudflared` (checksum-verified), opens a Cloudflare
   Quick Tunnel (no account), waits for DNS, swaps the QR to the `https://…trycloudflare.com` URL, and turns on a join code.
-- **`pmc.js` controller SDK.** Zero dependencies, no build step. Handles reconnect with backoff, clock sync, vibration and wake lock.
+- **`pmc.js` controller SDK.** Zero dependencies, no build step. Handles reconnect with backoff, clock sync
+  (per-player RTT + host-clock input timestamps for fair timing), haptics with an iOS-safe fallback,
+  and keep-the-screen-on (wake lock or a NoSleep-style clip where only `http://` is available).
 - **Lobby helpers.** `PMCQueue`, `PMCVote` (majority + vetoes + timeout) and `PMCRotation` (winner-stays / loser-stays / strict),
   extracted from a real party game.
 
@@ -83,6 +85,20 @@ debug (F5), it shows the running game's host status — port, join URL + QR, con
 Quick Tunnels are free and account-less, but the URL changes every run and has no uptime guarantee. While a tunnel is up,
 the host requires a join code and rate-limits bad codes per client IP (via `CF-Connecting-IP`). See the
 [open issues](../../issues?q=label%3Aoutside-lan) for limitations and alternatives (named tunnels, Tailscale Funnel, relays).
+
+## Mobile browser caveats
+
+Phone browsers have quirks desktop ones don't — worth knowing before you ship a party game:
+
+- **iOS has no vibration API.** `feedback(kind)` falls back to a screen flash + WebAudio click.
+- **Locked/backgrounded phones lose the socket.** The SDK reconnects on return; keep `grace_seconds` at
+  60–120 s so a pocketed phone isn't "gone", and call `keepScreenOn()` so it doesn't lock mid-game.
+- **Wake lock needs a secure context** — unavailable on plain `http://` LAN pages. `keepScreenOn()`
+  falls back to a muted looping clip; the https tunnel is the real fix.
+- **Two tabs in one browser share a player** (the token lives in localStorage): the newer tab replaces
+  the older. Use incognito windows or `connect({ tokenKey })` to fake several phones while developing.
+
+Details and workarounds: [docs/mobile-browsers.md](docs/mobile-browsers.md).
 
 ## Demo: Buzzer Party
 

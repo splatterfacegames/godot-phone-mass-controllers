@@ -31,6 +31,7 @@ var _reveal_until := 0
 var _last_phase := ""
 var _roster_dirty := true
 var _pin_visible := false
+var _seen_join_url := ""
 
 # UI
 var _font_bold: SystemFont
@@ -50,6 +51,7 @@ var _symbol_label: Label
 var _roster_title: Label
 var _roster: HFlowContainer
 var _round_label: Label
+var _moved_banner: PanelContainer
 
 
 func _ready() -> void:
@@ -67,6 +69,7 @@ func _ready() -> void:
 	host.port = int(args.get("port", "8080"))
 	host.join_code = args.get("code", "")
 	host.admin_pin = args.get("pin", "%04d" % (randi() % 10000))
+	host.grace_seconds = 90.0 # a pocketed/locked phone stays in the game ~90 s (recommended 60–120)
 	host.tunnel_allow_download = true # the "Share outside LAN" button is an explicit opt-in
 	add_child(host)
 
@@ -79,7 +82,7 @@ func _ready() -> void:
 	host.player_updated.connect(func(_p): _changed())
 	host.admin_authenticated.connect(func(_p): _changed())
 	host.message_received.connect(_on_message)
-	host.join_url_changed.connect(func(_url): _refresh_join_info())
+	host.join_url_changed.connect(_on_join_url_changed)
 	host.tunnel_state_changed.connect(_on_tunnel_state)
 
 	var err := host.start()
@@ -152,7 +155,7 @@ func _on_message(p: PMCPlayer, data) -> void:
 		return
 	match data.get("type"):
 		"buzz":
-			_on_buzz(p)
+			_on_buzz(p, data)
 		"admin":
 			if not p.is_admin:
 				return
@@ -170,9 +173,21 @@ func _on_message(p: PMCPlayer, data) -> void:
 						host.kick(id, "Removed by the game admin")
 
 
-func _on_buzz(p: PMCPlayer) -> void:
+func _on_buzz(p: PMCPlayer, data: Dictionary) -> void:
 	var now := Time.get_ticks_msec()
-	var r: Dictionary = game.buzz(p.id, now)
+	# Phones stamp their tap on the host clock (pmc.timestamp()). Credit it, but never further
+	# back than the player's round-trip time — fair for remote players, safe against backdating.
+	var rtt := _rtt_ms(p)
+	var at := now
+	var claimed = data.get("at")
+	if claimed is int or claimed is float:
+		var ticks := int(claimed)
+		# pmc.timestamp() uses the host clock the SDK sees; in epoch ms (v0.2+) that's a huge
+		# value, so translate it back to ticks. A raw Date.now() claim lands the same way.
+		if ticks > 100000000000:
+			ticks -= int(Time.get_unix_time_from_system() * 1000.0) - now
+		at = clampi(ticks, now - rtt, now)
+	var r: Dictionary = game.buzz(p.id, at, now)
 	var names := {Game.Buzz.WIN: "win", Game.Buzz.WRONG: "wrong", Game.Buzz.LOCKED: "locked", Game.Buzz.IDLE: "idle"}
 	host.send(p, {"type": "buzz", "result": names[r["result"]], "locked_ms": r["locked_ms"]})
 	if r["result"] == Game.Buzz.WIN:
@@ -214,13 +229,19 @@ func _changed() -> void:
 	host.broadcast({"type": "state"}.merged(_state()))
 
 
+## Round-trip ms, or 0 when unknown. (PMCPlayer.rtt_ms — read defensively.)
+func _rtt_ms(p: PMCPlayer) -> int:
+	var v = p.get("rtt_ms")
+	return int(v) if v is int or v is float else 0
+
+
 func _state() -> Dictionary:
 	var list: Array = []
 	for p in host.players(true):
 		list.append({
 			"id": p.id, "name": p.name, "color": str(p.profile.get("color", "#888888")),
 			"emoji": str(p.profile.get("emoji", "")), "score": int(game.scores.get(p.id, 0)),
-			"connected": p.connected, "admin": p.is_admin,
+			"connected": p.connected, "admin": p.is_admin, "rtt": _rtt_ms(p),
 		})
 	return {
 		"phase": game.phase, "round": game.round_no, "target": game.target_score,
@@ -264,6 +285,21 @@ func _refresh_join_info() -> void:
 	_url_label.text = url.split("?")[0].trim_prefix("http://").trim_prefix("https://")
 	_code_label.text = "CODE  %s" % host.join_code if host.join_code != "" else ""
 	_code_label.visible = host.join_code != ""
+
+
+func _on_join_url_changed(url: String) -> void:
+	# The tunnel URL is ephemeral — when it changes, every scanned QR is stale. Say so loudly.
+	var changed := _seen_join_url != "" and url != _seen_join_url
+	_seen_join_url = url
+	_refresh_join_info()
+	if changed:
+		_moved_banner.show()
+		print("BUZZER_MOVED url=%s" % url)
+
+
+func _on_moved_banner_input(e: InputEvent) -> void:
+	if e is InputEventMouseButton and e.pressed:
+		_moved_banner.hide()
 
 
 # --- UI -------------------------------------------------------------------------
@@ -426,6 +462,19 @@ func _build_ui() -> void:
 	_roster.add_theme_constant_override("v_separation", 10)
 	scroll.add_child(_roster)
 
+	# Full-width banner when the join URL moves (ephemeral tunnel). Click to dismiss.
+	_moved_banner = PanelContainer.new()
+	_moved_banner.set_anchors_preset(PRESET_TOP_WIDE)
+	_moved_banner.add_theme_stylebox_override("panel", _box(ACCENT, 0, 12, 10))
+	var mb := _label("JOIN LINK CHANGED — phones: re-scan the QR", 22, Color("#16121a"))
+	mb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_moved_banner.add_child(mb)
+	_moved_banner.tooltip_text = "Click to dismiss"
+	_moved_banner.mouse_filter = Control.MOUSE_FILTER_STOP
+	_moved_banner.gui_input.connect(_on_moved_banner_input)
+	_moved_banner.hide()
+	add_child(_moved_banner)
+
 
 func _on_pin_label_input(e: InputEvent) -> void:
 	if e is InputEventMouseButton and e.pressed:
@@ -536,10 +585,13 @@ func _player_card(p: PMCPlayer) -> Control:
 	name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	name_label.custom_minimum_size.x = 80
 	text.add_child(name_label)
-	var status := "admin" if p.is_admin else ""
+	var status := "admin" if p.is_admin else "connected"
+	var rtt := _rtt_ms(p)
+	if p.connected and rtt > 0:
+		status += " · %d ms" % rtt
 	if not p.connected:
-		status = "reconnecting…"
-	var status_label := _label(status if status != "" else "connected", 13, GOOD if p.connected else DIM)
+		status = "reconnecting…" # socket lost, grace running — distinct from "left"
+	var status_label := _label(status, 13, GOOD if p.connected else DIM)
 	status_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	text.add_child(status_label)
 

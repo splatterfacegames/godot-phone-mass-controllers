@@ -1,14 +1,14 @@
 // Buzzer Party phone controller. Plain ES module; the SDK is served by the Godot host.
 //
 // Game messages (JSON `d`):
-//   host -> phone  {type:"state", phase, round, target, winner, match_winner, players:[{id,name,color,emoji,score,connected,admin}]}
+//   host -> phone  {type:"state", phase, round, target, winner, match_winner, players:[{id,name,color,emoji,score,connected,admin,rtt}]}
 //                  {type:"secret", round, for, symbol:{id,label,color,shape}}   (private, only to `for`)
 //                  {type:"flash", round, symbol, seq}                          (what the big screen shows)
 //                  {type:"buzz", result:"win"|"wrong"|"locked"|"idle", locked_ms} (private)
-//   phone -> host  {type:"buzz"}
+//   phone -> host  {type:"buzz", at}     (at = pmc.timestamp(): host-clock tap time, RTT-bounded)
 //                  {type:"admin", action:"start"|"next"|"reset"|"kick", id?}
-//   binary         any bytes are echoed back to the sender (used here as a latency probe)
-import { connect, vibrate, wakeLock } from '/pmc/pmc.js';
+//   binary         any bytes are echoed back to the sender
+import { connect, feedback, keepScreenOn } from '/pmc/pmc.js';
 
 const COLORS = ['#ff5a5f', '#ff8c42', '#ffc53d', '#2ec27e', '#26c6da', '#3d8bfd', '#a371f7', '#ff6fb5'];
 const EMOJIS = ['🦊', '🐸', '🐙', '🦉', '🐼', '🦄', '🐝', '🐢', '🌵', '🍉', '🚀', '👾', '🎸', '🍩', '⚡', '🌈'];
@@ -58,7 +58,7 @@ $('join-form').onsubmit = (ev) => {
   else start();
   paintMe();
   show('play');
-  wakeLock();
+  keepScreenOn(); // wake lock where allowed; NoSleep-style video fallback elsewhere
 };
 
 $('edit-btn').onclick = () => {
@@ -87,11 +87,7 @@ function start() {
     paintMe();
   });
   pmc.on('message', onMessage);
-  pmc.on('binary', (buf) => {
-    if (buf.byteLength !== 8) return;
-    const sent = new Float64Array(buf)[0];
-    $('latency').textContent = `${Math.round(performance.now() - sent)} ms`;
-  });
+  pmc.on('moved', () => { $('moved').hidden = false; }); // join URL changed: ask for a re-scan
   pmc.on('reject', ({ code, reason }) => {
     const badCode = code === 'bad_code';
     end(badCode ? 'Room code needed' : 'Could not join', badCode ? 'Enter the code shown on the big screen.' : reason || code, badCode);
@@ -101,8 +97,8 @@ function start() {
 }
 
 setInterval(() => {
-  if (pmc?.status === 'open') pmc.sendBinary(new Float64Array([performance.now()]));
-}, 3000);
+  $('latency').textContent = pmc?.rttMs ? `${pmc.rttMs} ms` : '– ms';
+}, 1000);
 
 function end(title, text, askCode = false) {
   $('ended-title').textContent = title;
@@ -139,7 +135,7 @@ function onMessage(d) {
       $('secret-shape').innerHTML = shapeSvg(d.symbol.shape, d.symbol.color);
       $('secret-label').textContent = d.symbol.label;
       $('secret-label').style.color = d.symbol.color;
-      vibrate([40, 60, 40]);
+      feedback('buzz');
       break;
     case 'buzz':
       onBuzzResult(d);
@@ -154,10 +150,10 @@ function clearSecretIfOld() {
 function onBuzzResult({ result, locked_ms }) {
   const fb = $('feedback');
   fb.className = 'feedback ' + result;
-  if (result === 'win') { fb.textContent = 'Got it! +1'; $('buzzer').classList.add('won'); vibrate([80, 40, 160]); }
+  if (result === 'win') { fb.textContent = 'Got it! +1'; $('buzzer').classList.add('won'); feedback('success'); }
   else if (result === 'wrong' || result === 'locked') {
     fb.textContent = 'Not your symbol! Wait…';
-    vibrate(300);
+    feedback('error');
     clearTimeout(lockTimer);
     $('buzzer').classList.add('locked');
     lockTimer = setTimeout(() => { $('buzzer').classList.remove('locked'); fb.textContent = ' '; }, locked_ms);
@@ -211,8 +207,10 @@ function renderBuzzer() {
 $('buzzer').addEventListener('pointerdown', (ev) => {
   ev.preventDefault();
   if ($('buzzer').disabled) return;
-  pmc.send({ type: 'buzz' });
-  vibrate(25);
+  // Stamp the tap on the host clock: the host credits it bounded by our RTT, so a
+  // remote player isn't beaten by a local one just because the tunnel is slower.
+  pmc.send({ type: 'buzz', at: pmc.timestamp() });
+  feedback('buzz');
 });
 
 $('pin-form').onsubmit = async (ev) => {
