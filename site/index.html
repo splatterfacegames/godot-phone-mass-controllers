@@ -239,8 +239,10 @@ func _on_message(player: PMCPlayer, data) -> void:
         <li>
           <strong>Quick-tunnel URLs are ephemeral.</strong> Every <code>start_tunnel()</code> gets a new
           <code>*.trycloudflare.com</code> address, free and account-less but strictly best-effort — no
-          uptime guarantee. Great for a game night; not a hosted endpoint. Named tunnels, Tailscale
-          Funnel or a real relay are tracked as open issues.
+          uptime guarantee. Great for a game night; not a hosted endpoint. For a stable
+          <code>https://party.example.com</code>, set a named tunnel
+          (<code>tunnel_mode = "named"</code> + a Cloudflare token); Tailscale Funnel, ngrok and relay
+          options are compared in <a href="https://github.com/splatterfacegames/godot-phone-mass-controllers/blob/main/docs/tunnels.md">docs/tunnels.md</a>.
         </li>
         <li>
           <strong>Plain LAN http isn't a secure context.</strong> Screen wake lock and a few other web
