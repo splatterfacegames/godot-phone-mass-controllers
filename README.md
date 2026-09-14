@@ -75,12 +75,42 @@ export preset's *non-resource* filter, so they're packed as-is instead of being 
 host.tunnel_allow_download = true      # opt in to fetching cloudflared at runtime
 host.tunnel_state_changed.connect(func(state, url): print(state, " ", url))
 host.start_tunnel()                    # ~10 s later: join_url_changed → the QR now shows https://…trycloudflare.com/?code=ABCD
+host.start_tunnel("WXYZ")              # or supply your own join code (never auto-cleared)
+host.restart_tunnel()                  # rolling restart: players get pmc.moved with the new URL first
 ```
 
-The editor dock (*Phone Controllers*, bottom panel) can pre-download `cloudflared` and run a test tunnel.
-Quick Tunnels are free and account-less, but the URL changes every run and has no uptime guarantee. While a tunnel is up,
-the host requires a join code and rate-limits bad codes per client IP (via `CF-Connecting-IP`). See the
-[open issues](../../issues?q=label%3Aoutside-lan) for limitations and alternatives (named tunnels, Tailscale Funnel, relays).
+A `ready` tunnel survives `host.stop()` → `host.start()` on the same port and even a scene reload (it's detached
+to the tree root and re-adopted for ~2 min); `stop_tunnel()` always ends it. If it drops mid-party, the host
+auto-restarts it (`tunnel_auto_restart`, bounded) and phones rescan the new QR. The QR/join URL is never shown
+before `ready`, and `tunnel_verify_dns` waits for the new hostname to resolve — a phone that still lands on a
+cached "no such host" can be fixed by toggling airplane mode or waiting ~90 s.
+
+The editor dock (*Phone Controllers*, bottom panel) can pre-download `cloudflared` and run a test tunnel —
+quick or, with a token + hostname, named.
+
+### Quick Tunnel limits
+
+Quick Tunnels are free and account-less — but best-effort:
+
+- **Ephemeral**: every start gets a new `https://<random>.trycloudflare.com`. Printed QRs and shared links go stale.
+- **No SLA**: a tunnel can drop mid-party → `tunnel_state_changed("lost", reason)`; an alive process may recover
+  on its own, otherwise the host restarts it.
+- **Rate limits**: creation can be refused with HTTP 429 / error 1015 (retried with backoff — `max_retries`),
+  ~200 concurrent in-flight requests per tunnel, no Server-Sent Events. WebSockets work.
+- **Blocked networks**: cloudflared prefers QUIC (UDP 7844). When that looks blocked it retries once over
+  HTTP/2 (TCP 443); force it with `tunnel_extra_args = ["--protocol", "http2"]`. DNS filters can block
+  `trycloudflare.com` entirely.
+
+For stable links (`https://party.example.com`) use a **named tunnel**: a Cloudflare account + zone, then
+`tunnel_mode = "named"`, `named_tunnel_token` (dashboard "run with token") and `named_tunnel_hostname`.
+Setup walkthrough and alternatives (Tailscale Funnel, ngrok, relays) in [docs/tunnels.md](docs/tunnels.md);
+out-of-LAN on platforms that can't spawn processes (Android/iOS/Web/consoles) is scoped in
+[docs/relay-scope.md](docs/relay-scope.md).
+
+Downloaded binaries are SHA-256-verified against GitHub's release digest, then Authenticode (Windows) /
+`codesign` (macOS) verified, kept under `user://pmc/bin`, re-verified after `binary_max_age_days` (30), and the
+child pid is tracked in `user://pmc/cloudflared.pid` so a cloudflared orphaned by a crash is reaped next start.
+While a tunnel is up, the host requires a join code and rate-limits bad codes per client IP (via `CF-Connecting-IP`).
 
 ## Demo: Buzzer Party
 
@@ -96,7 +126,8 @@ protocol and [addons/phone_mass_controllers/web/README.md](addons/phone_mass_con
 **`PMCHost`**:
 - **Settings:** `port`/`port_search`, `controller_dir`, `join_code`, `max_players`, `grace_seconds`, `remember_seconds`, `admin_pin`, `advertise_url`, plus limits (`max_connections_per_address`, `join_code_max_failures`, header/body/message sizes, timeouts).
 - **Signals:** `player_joined`, `player_rejoined`, `player_disconnected`, `player_left(player, reason)`, `player_updated`, `admin_authenticated`, `message_received(player, data)`, `join_url_changed`, `tunnel_state_changed`.
-- **Methods:** `start()`, `stop()`, `send()`, `broadcast()`, `kick()`, `players()`, `get_player()`, `join_url()`, `lan_addresses()`, `qr_texture()`, `add_route()`, `serve_directory()`, `start_tunnel()`, `stop_tunnel()`, `get_stats()`.
+- **Methods:** `start()`, `stop()`, `send()`, `broadcast()`, `kick()`, `players()`, `get_player()`, `join_url()`, `lan_addresses()`, `qr_texture()`, `add_route()`, `serve_directory()`, `start_tunnel(code)`, `restart_tunnel(code)`, `stop_tunnel()`, `get_tunnel()`, `get_stats()`.
+- **Tunnel exports:** `tunnel_mode` (`quick`/`named`), `named_tunnel_token`/`named_tunnel_hostname`, `tunnel_allow_download`, `cloudflared_path`, `tunnel_verify_dns`, `tunnel_ready_timeout_sec`, `tunnel_extra_args`, `tunnel_join_code`, `tunnel_auto_restart`, `tunnel_restart_delay_sec`.
 
 **`PMCPlayer`**: `id`, `token`, `name`, `profile`, `connected`, `is_admin`, `meta` (your per-player game data, kept across rejoin), `remote_address`.
 
