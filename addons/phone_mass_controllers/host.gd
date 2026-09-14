@@ -1448,7 +1448,7 @@ static func _secure_equals(a: String, b: String) -> bool:
 # Tunnel
 
 ## Starts a Cloudflare Quick Tunnel to this host (starting the host first if needed). Progress is reported via
-## [signal tunnel_state_changed]. When it's ready, [member advertise_url] becomes the tunnel URL and a 4-letter
+## [signal tunnel_state_changed]. When it's ready, [member advertise_url] becomes the tunnel URL and a 6-letter
 ## [member join_code] is generated if none is set.
 func start_tunnel() -> void:
 	if _tunnel != null:

@@ -214,7 +214,8 @@ pmc.id; pmc.serverNow();              // ms, clock-offset corrected
 3. Run `cloudflared tunnel --no-autoupdate --url http://127.0.0.1:<port>` via `OS.execute_with_pipe`. Read stderr
    for `https://<random>.trycloudflare.com` and wait for the "Registered tunnel connection" line.
 4. On ready: `advertise_url` = tunnel URL, `join_url_changed`, QR regenerates. **If `join_code` is empty, auto-generate
-   a 4-letter code** (the host is now on the public internet).
+   a 6-letter code** (24^6 ≈ 191M — the host is now on the public internet). The QR and `join_url()` carry it
+   as `?code=`; while tunneled, `/pmc/info.json` and `/pmc/qr.png` answer only to loopback or a valid `?code=`.
 5. Kill the process on `stop_tunnel()`, host `stop()`, and `NOTIFICATION_WM_CLOSE_REQUEST` / exit.
    Surface failures (no network, download blocked, process exit) through `tunnel_state_changed("failed", reason)`.
 
