@@ -5,6 +5,7 @@ extends VBoxContainer
 ## Built entirely in code so it has no scene dependencies; it also works outside the editor for tests.
 
 const REPO_URL := "https://github.com/splatterfacegames/godot-phone-mass-controllers"
+const DebuggerScript := preload("res://addons/phone_mass_controllers/editor/debugger_plugin.gd")
 const LINKS := [
 	["README", REPO_URL + "#readme"],
 	["Spec: outside-LAN join", REPO_URL + "/blob/main/SPEC.md#5-outside-lan-join-one-click-cloudflare-quick-tunnel"],
@@ -27,8 +28,15 @@ var url_edit: LineEdit
 var copy_button: Button
 var open_url_button: Button
 var qr_rect: TextureRect
+var game_status: Label
+var game_url_edit: LineEdit
+var game_copy_button: Button
+var game_open_button: Button
+var game_players: Label
+var game_qr: TextureRect
 
 var _downloading := false
+var _game_sessions: Dictionary = {} # session_id -> last status payload
 
 
 func _init() -> void:
@@ -113,6 +121,44 @@ func _init() -> void:
 		b.tooltip_text = l[1]
 		links.add_child(b)
 
+	# running game status (fed by debugger_plugin.gd / ingame_reporter.gd over EngineDebugger)
+	var game := VBoxContainer.new()
+	game.custom_minimum_size = Vector2(210, 0)
+	game.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	columns.add_child(game)
+	game.add_child(_heading("Running game"))
+	game_status = Label.new()
+	game_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	game_status.text = "Run the game from this editor (F5) to see its host status here."
+	game.add_child(game_status)
+	var game_url_row := HBoxContainer.new()
+	game.add_child(game_url_row)
+	game_url_edit = LineEdit.new()
+	game_url_edit.editable = false
+	game_url_edit.placeholder_text = "http://<lan-ip>:<port>/?code=…"
+	game_url_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	game_url_row.add_child(game_url_edit)
+	game_copy_button = Button.new()
+	game_copy_button.text = "Copy"
+	game_copy_button.disabled = true
+	game_copy_button.pressed.connect(func() -> void: DisplayServer.clipboard_set(game_url_edit.text))
+	game_url_row.add_child(game_copy_button)
+	game_open_button = Button.new()
+	game_open_button.text = "Open"
+	game_open_button.disabled = true
+	game_open_button.pressed.connect(func() -> void: OS.shell_open(game_url_edit.text))
+	game_url_row.add_child(game_open_button)
+	game_players = Label.new()
+	game_players.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	game.add_child(game_players)
+	game_qr = TextureRect.new()
+	game_qr.custom_minimum_size = Vector2(160, 160)
+	game_qr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	game_qr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	game_qr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	game_qr.tooltip_text = "Scan with a phone to join the running game."
+	game.add_child(game_qr)
+
 	qr_rect = TextureRect.new()
 	qr_rect.custom_minimum_size = Vector2(180, 180)
 	qr_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
@@ -134,6 +180,7 @@ func _init() -> void:
 
 func _ready() -> void:
 	_refresh_binary()
+	DebuggerScript.dock = self
 
 
 func _process(_delta: float) -> void:
@@ -143,6 +190,8 @@ func _process(_delta: float) -> void:
 
 
 func _exit_tree() -> void:
+	if DebuggerScript.dock == self:
+		DebuggerScript.dock = null
 	if tunnel != null:
 		tunnel.stop()
 	if responder != null:
@@ -227,11 +276,60 @@ func _on_tunnel_state(state: String, detail: String) -> void:
 
 
 func _show_url(u: String) -> void:
-	url_edit.text = u
-	copy_button.disabled = u == ""
-	open_url_button.disabled = u == ""
+	_set_url_row(u, url_edit, copy_button, open_url_button, qr_rect)
+
+
+## Live status pushed by the running game (see debugger_plugin.gd). [param d] is the reporter payload.
+func apply_game_status(session_id: int, d: Dictionary) -> void:
+	_game_sessions[session_id] = d
+	_refresh_game_status()
+
+
+## The game's debug session ended.
+func clear_game_status(session_id: int) -> void:
+	_game_sessions.erase(session_id)
+	_refresh_game_status()
+
+
+func _refresh_game_status() -> void:
+	var best := {}
+	var best_msec := -1
+	for id in _game_sessions:
+		var d: Dictionary = _game_sessions[id]
+		if int(d.get("msec", 0)) >= best_msec:
+			best_msec = int(d.get("msec", 0))
+			best = d
+	if best.is_empty():
+		game_status.text = "Run the game from this editor (F5) to see its host status here."
+		game_players.text = ""
+		_set_url_row("", game_url_edit, game_copy_button, game_open_button, game_qr)
+		return
+	if not best.get("running", false):
+		game_status.text = "PMCHost found in the running game, but it isn't listening."
+		game_players.text = ""
+		_set_url_row("", game_url_edit, game_copy_button, game_open_button, game_qr)
+		return
+	var n := int(best.get("players", 0))
+	var total := int(best.get("players_total", n))
+	var players_text := "%d player%s" % [n, "" if n == 1 else "s"]
+	if total > n:
+		players_text += " (%d reconnecting)" % (total - n)
+	var parts: Array[String] = ["port %d" % int(best.get("port", 0)), players_text]
+	var ts := String(best.get("tunnel_state", ""))
+	if ts != "" and ts != "stopped":
+		parts.append("tunnel: " + ts)
+	game_status.text = " · ".join(parts)
+	var names: Array = best.get("player_names", [])
+	game_players.text = ", ".join(names) if names.size() > 0 else "No players yet."
+	_set_url_row(String(best.get("join_url", "")), game_url_edit, game_copy_button, game_open_button, game_qr)
+
+
+static func _set_url_row(u: String, edit: LineEdit, copy_b: Button, open_b: Button, qr: TextureRect) -> void:
+	edit.text = u
+	copy_b.disabled = u == ""
+	open_b.disabled = u == ""
 	if u == "":
-		qr_rect.texture = null
+		qr.texture = null
 		return
 	var m := PMCQr.encode(u, PMCQr.ECC_M)
-	qr_rect.texture = ImageTexture.create_from_image(PMCQr.to_image(m, 6, 4)) if m != null else null
+	qr.texture = ImageTexture.create_from_image(PMCQr.to_image(m, 6, 4)) if m != null else null
